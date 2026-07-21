@@ -2,6 +2,14 @@ export const MIND_MAP_NODE_META_KEY = 'cowartMindMapNode'
 export const MIND_MAP_EDGE_META_KEY = 'cowartMindMapEdge'
 export const MIND_MAP_VERSION = 1
 export const DEFAULT_MIND_MAP_STYLE_PRESET_ID = 'balanced'
+export const DEFAULT_MIND_MAP_STRUCTURE_ID = 'balanced'
+
+export const MIND_MAP_STRUCTURES = Object.freeze({
+  balanced: Object.freeze({ label: '双向导图', direction: 'balanced', layout: 'horizontal' }),
+  right: Object.freeze({ label: '向右逻辑图', direction: 'right', layout: 'horizontal' }),
+  left: Object.freeze({ label: '向左逻辑图', direction: 'left', layout: 'horizontal' }),
+  'org-down': Object.freeze({ label: '组织结构图', direction: 'down', layout: 'vertical' })
+})
 
 export const MIND_MAP_STYLE_PRESETS = Object.freeze({
   balanced: Object.freeze({
@@ -86,6 +94,35 @@ export function getMindMapNodeDimensions(depth, scale = 1) {
 export function getMindMapStylePresetId(root) {
   const presetId = root?.meta?.cowartMindMapStylePreset
   return MIND_MAP_STYLE_PRESETS[presetId] ? presetId : DEFAULT_MIND_MAP_STYLE_PRESET_ID
+}
+
+export function getMindMapStructureId(root) {
+  const structureId = root?.meta?.cowartMindMapStructure
+  return MIND_MAP_STRUCTURES[structureId] ? structureId : DEFAULT_MIND_MAP_STRUCTURE_ID
+}
+
+export function getMindMapStructureDefinition(structureId) {
+  return MIND_MAP_STRUCTURES[structureId] ?? MIND_MAP_STRUCTURES[DEFAULT_MIND_MAP_STRUCTURE_ID]
+}
+
+export function getMindMapConnectionAnchors(structureId, side = 'right') {
+  const { direction } = getMindMapStructureDefinition(structureId)
+  if (direction === 'down') {
+    return {
+      start: { x: 0.5, y: 1 },
+      end: { x: 0.5, y: 0 }
+    }
+  }
+  if (direction === 'left' || (direction === 'balanced' && side === 'left')) {
+    return {
+      start: { x: 0, y: 0.5 },
+      end: { x: 1, y: 0.5 }
+    }
+  }
+  return {
+    start: { x: 1, y: 0.5 },
+    end: { x: 0, y: 0.5 }
+  }
 }
 
 export function getMindMapPresetNodeProps(presetId, depth, branchColor = 'blue') {
@@ -559,18 +596,27 @@ export function createMindMapLayoutUpdates(
   { includePositions = true, autoLayout = true } = {}
 ) {
   const updates = []
+  const persistSides = getMindMapStructureDefinition(layout.structureId).direction === 'balanced'
 
   for (const node of graph.nodeById.values()) {
     if (!layout.nodeIds.has(node.id)) continue
     const position = layout.positions.get(node.id)
     const side = layout.sides.get(node.id) ?? node.meta?.cowartMindMapSide ?? 'center'
+    const savedSide = node.meta?.cowartMindMapSide
+    const normalizedSide = position?.depth === 0
+      ? 'center'
+      : persistSides
+        ? side
+        : savedSide === 'left' || savedSide === 'right' || savedSide === 'auto'
+          ? savedSide
+          : 'auto'
     updates.push({
       id: node.id,
       type: node.type,
       ...(includePositions && position ? { x: position.x, y: position.y } : {}),
       meta: {
         ...node.meta,
-        cowartMindMapSide: side,
+        cowartMindMapSide: normalizedSide,
         cowartMindMapHidden: layout.hiddenNodeIds.has(node.id),
         ...(position?.depth === 0 ? { cowartMindMapAutoLayout: autoLayout } : {})
       }
@@ -592,6 +638,34 @@ export function createMindMapLayoutUpdates(
   return updates
 }
 
+function anchorsEqual(left, right) {
+  return Number(left?.x) === Number(right?.x) && Number(left?.y) === Number(right?.y)
+}
+
+export function createMindMapBindingUpdates(graph, layout) {
+  const updates = []
+  for (const edgeId of layout.edgeIds) {
+    const relation = graph.relationByEdge.get(edgeId)
+    if (!relation) continue
+    const side = layout.sides.get(relation.childId) ?? graph.nodeById.get(relation.childId)?.meta?.cowartMindMapSide
+    const anchors = getMindMapConnectionAnchors(layout.structureId, side)
+    for (const [binding, anchor] of [
+      [relation.startBinding, anchors.start],
+      [relation.endBinding, anchors.end]
+    ]) {
+      if (!binding || anchorsEqual(binding.props?.normalizedAnchor, anchor)) continue
+      updates.push({
+        id: binding.id,
+        type: binding.type,
+        fromId: binding.fromId,
+        toId: binding.toId,
+        props: { ...binding.props, normalizedAnchor: anchor }
+      })
+    }
+  }
+  return updates
+}
+
 function nodeWidth(shape) {
   return Math.max(1, Number(shape?.props?.w) || 1)
 }
@@ -609,42 +683,28 @@ function collectHiddenRecords(graph, collapsedNodeId, hiddenNodeIds, hiddenEdgeI
   }
 }
 
-export function computeMindMapLayout(
+function emptyMindMapLayout(structureId) {
+  return {
+    structureId,
+    positions: new Map(),
+    sides: new Map(),
+    hiddenNodeIds: new Set(),
+    hiddenEdgeIds: new Set(),
+    nodeIds: new Set(),
+    edgeIds: new Set()
+  }
+}
+
+function computeHorizontalMindMapPositions(
   graph,
   rootId,
-  { horizontalGap = 112, verticalGap = 32 } = {}
+  rootShape,
+  visibleChildren,
+  direction,
+  horizontalGap,
+  verticalGap
 ) {
-  const rootShape = graph.nodeById.get(rootId)
-  if (!rootShape) {
-    return {
-      positions: new Map(),
-      sides: new Map(),
-      hiddenNodeIds: new Set(),
-      hiddenEdgeIds: new Set(),
-      nodeIds: new Set(),
-      edgeIds: new Set()
-    }
-  }
-
-  const nodeIds = new Set([rootId, ...getMindMapDescendantIds(graph, rootId)])
-  const edgeIds = new Set(
-    [...nodeIds]
-      .filter((nodeId) => nodeId !== rootId)
-      .map((nodeId) => graph.edgeByChild.get(nodeId))
-      .filter(Boolean)
-  )
-  const hiddenNodeIds = new Set()
-  const hiddenEdgeIds = new Set()
-  for (const nodeId of nodeIds) {
-    const node = graph.nodeById.get(nodeId)
-    if (node.meta?.cowartMindMapCollapsed === true) {
-      collectHiddenRecords(graph, node.id, hiddenNodeIds, hiddenEdgeIds)
-    }
-  }
-
   const sides = new Map([[rootId, 'center']])
-  const visibleChildren = (nodeId) =>
-    hiddenNodeIds.has(nodeId) ? [] : (graph.childrenByParent.get(nodeId) ?? []).filter((id) => !hiddenNodeIds.has(id))
   const subtreeHeightCache = new Map()
   const measureSubtreeHeight = (nodeId) => {
     if (subtreeHeightCache.has(nodeId)) return subtreeHeightCache.get(nodeId)
@@ -666,13 +726,18 @@ export function computeMindMapLayout(
     const child = graph.nodeById.get(childId)
     const requestedSide = child?.meta?.cowartMindMapSide
     const height = measureSubtreeHeight(childId)
-    let side = requestedSide === 'left' || requestedSide === 'right'
-      ? requestedSide
-      : leftHeight < rightHeight
-        ? 'left'
-        : 'right'
-    if (requestedSide !== 'left' && requestedSide !== 'right' && leftHeight === rightHeight) {
-      side = rightRoots.length <= leftRoots.length ? 'right' : 'left'
+    let side
+    if (direction === 'left' || direction === 'right') {
+      side = direction
+    } else {
+      side = requestedSide === 'left' || requestedSide === 'right'
+        ? requestedSide
+        : leftHeight < rightHeight
+          ? 'left'
+          : 'right'
+      if (requestedSide !== 'left' && requestedSide !== 'right' && leftHeight === rightHeight) {
+        side = rightRoots.length <= leftRoots.length ? 'right' : 'left'
+      }
     }
     sides.set(childId, side)
     if (side === 'left') {
@@ -752,5 +817,121 @@ export function computeMindMapLayout(
   layoutSide(leftRoots, 'left')
   layoutSide(rightRoots, 'right')
 
-  return { positions, sides, hiddenNodeIds, hiddenEdgeIds, nodeIds, edgeIds }
+  return { positions, sides }
+}
+
+function computeDownwardMindMapPositions(
+  graph,
+  rootId,
+  rootShape,
+  visibleChildren,
+  levelGap,
+  siblingGap
+) {
+  const sides = new Map([[rootId, 'center']])
+  const subtreeWidthCache = new Map()
+  const maxHeightByDepth = new Map()
+  const measureSubtreeWidth = (nodeId) => {
+    if (subtreeWidthCache.has(nodeId)) return subtreeWidthCache.get(nodeId)
+    const shape = graph.nodeById.get(nodeId)
+    const children = shape?.meta?.cowartMindMapCollapsed === true ? [] : visibleChildren(nodeId)
+    const childrenWidth = children.length
+      ? children.reduce((sum, childId) => sum + measureSubtreeWidth(childId), 0) + siblingGap * (children.length - 1)
+      : 0
+    const width = Math.max(nodeWidth(shape), childrenWidth)
+    subtreeWidthCache.set(nodeId, width)
+    return width
+  }
+  const collectDepthHeights = (nodeId, depth) => {
+    const shape = graph.nodeById.get(nodeId)
+    maxHeightByDepth.set(depth, Math.max(maxHeightByDepth.get(depth) ?? 0, nodeHeight(shape)))
+    for (const childId of visibleChildren(nodeId)) collectDepthHeights(childId, depth + 1)
+  }
+  measureSubtreeWidth(rootId)
+  collectDepthHeights(rootId, 0)
+
+  const rowY = new Map([[0, Number(rootShape.y)]])
+  const maxDepth = Math.max(0, ...maxHeightByDepth.keys())
+  for (let depth = 1; depth <= maxDepth; depth += 1) {
+    rowY.set(depth, rowY.get(depth - 1) + (maxHeightByDepth.get(depth - 1) ?? 0) + levelGap)
+  }
+
+  const positions = new Map()
+  const layoutBranch = (nodeId, depth, left) => {
+    const shape = graph.nodeById.get(nodeId)
+    const width = measureSubtreeWidth(nodeId)
+    sides.set(nodeId, depth === 0 ? 'center' : 'down')
+    positions.set(nodeId, {
+      x: left + (width - nodeWidth(shape)) / 2,
+      y: rowY.get(depth),
+      side: depth === 0 ? 'center' : 'down',
+      depth
+    })
+
+    const children = shape?.meta?.cowartMindMapCollapsed === true ? [] : visibleChildren(nodeId)
+    if (!children.length) return
+    const childrenWidth = children.reduce((sum, childId) => sum + measureSubtreeWidth(childId), 0) +
+      siblingGap * (children.length - 1)
+    let childLeft = left + (width - childrenWidth) / 2
+    for (const childId of children) {
+      layoutBranch(childId, depth + 1, childLeft)
+      childLeft += measureSubtreeWidth(childId) + siblingGap
+    }
+  }
+
+  const rootCenterX = Number(rootShape.x) + nodeWidth(rootShape) / 2
+  layoutBranch(rootId, 0, rootCenterX - measureSubtreeWidth(rootId) / 2)
+  return { positions, sides }
+}
+
+export function computeMindMapLayout(
+  graph,
+  rootId,
+  { horizontalGap = 112, verticalGap = 32, structureId: requestedStructureId = null } = {}
+) {
+  const rootShape = graph.nodeById.get(rootId)
+  const structureId = MIND_MAP_STRUCTURES[requestedStructureId]
+    ? requestedStructureId
+    : getMindMapStructureId(rootShape)
+  if (!rootShape) return emptyMindMapLayout(structureId)
+  const structure = getMindMapStructureDefinition(structureId)
+
+  const nodeIds = new Set([rootId, ...getMindMapDescendantIds(graph, rootId)])
+  const edgeIds = new Set(
+    [...nodeIds]
+      .filter((nodeId) => nodeId !== rootId)
+      .map((nodeId) => graph.edgeByChild.get(nodeId))
+      .filter(Boolean)
+  )
+  const hiddenNodeIds = new Set()
+  const hiddenEdgeIds = new Set()
+  for (const nodeId of nodeIds) {
+    const node = graph.nodeById.get(nodeId)
+    if (node.meta?.cowartMindMapCollapsed === true) {
+      collectHiddenRecords(graph, node.id, hiddenNodeIds, hiddenEdgeIds)
+    }
+  }
+
+  const visibleChildren = (nodeId) =>
+    hiddenNodeIds.has(nodeId) ? [] : (graph.childrenByParent.get(nodeId) ?? []).filter((id) => !hiddenNodeIds.has(id))
+  const { positions, sides } = structure.layout === 'vertical'
+    ? computeDownwardMindMapPositions(
+      graph,
+      rootId,
+      rootShape,
+      visibleChildren,
+      horizontalGap,
+      verticalGap
+    )
+    : computeHorizontalMindMapPositions(
+      graph,
+      rootId,
+      rootShape,
+      visibleChildren,
+      structure.direction,
+      horizontalGap,
+      verticalGap
+    )
+
+  return { structureId, positions, sides, hiddenNodeIds, hiddenEdgeIds, nodeIds, edgeIds }
 }

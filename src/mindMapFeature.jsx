@@ -17,13 +17,16 @@ import { generateKeyBetween } from 'fractional-indexing'
 import { useCallback, useEffect, useState } from 'react'
 
 import {
+  DEFAULT_MIND_MAP_STRUCTURE_ID,
   DEFAULT_MIND_MAP_STYLE_PRESET_ID,
+  MIND_MAP_STRUCTURES,
   MIND_MAP_STYLE_PRESETS,
   MIND_MAP_VERSION,
   buildMindMapGraph,
   collectMindMapBranchRecordIds,
   collectMindMapCascadeShapeIds,
   computeMindMapLayout,
+  createMindMapBindingUpdates,
   createMindMapDepthStyleUpdates,
   createMindMapEdgeAtomically,
   createMindMapLayoutUpdates,
@@ -31,12 +34,15 @@ import {
   createMindMapStyleUpdates,
   createMindMapTranslationUpdates,
   getMindMapChildStyle,
+  getMindMapConnectionAnchors,
   getMindMapDescendantIds,
   getMindMapLabelColor,
   getMindMapNodeDepth,
   getMindMapNodeDimensions,
   getMindMapPresetNodeProps,
   getMindMapRootId,
+  getMindMapStructureDefinition,
+  getMindMapStructureId,
   getMindMapStylePresetId,
   isMindMapEdge,
   isMindMapNode
@@ -105,7 +111,14 @@ function nodeScale(editor) {
   return editor.getResizeScaleFactor()
 }
 
-function mindMapNodeMeta({ order, side = 'center', autoLayout, collapsed = false, stylePreset = null }) {
+function mindMapNodeMeta({
+  order,
+  side = 'center',
+  autoLayout,
+  collapsed = false,
+  structure = null,
+  stylePreset = null
+}) {
   return {
     cowartMindMapNode: true,
     cowartMindMapVersion: MIND_MAP_VERSION,
@@ -113,6 +126,7 @@ function mindMapNodeMeta({ order, side = 'center', autoLayout, collapsed = false
     cowartMindMapSide: side,
     cowartMindMapCollapsed: collapsed,
     cowartMindMapHidden: false,
+    ...(structure ? { cowartMindMapStructure: structure } : {}),
     ...(stylePreset ? { cowartMindMapStylePreset: stylePreset } : {}),
     ...(typeof autoLayout === 'boolean' ? { cowartMindMapAutoLayout: autoLayout } : {})
   }
@@ -174,6 +188,7 @@ function createMindMapRoot(editor) {
       order: generateKeyBetween(null, null),
       side: 'center',
       autoLayout: true,
+      structure: DEFAULT_MIND_MAP_STRUCTURE_ID,
       stylePreset: DEFAULT_MIND_MAP_STYLE_PRESET_ID
     }),
     props: {
@@ -200,8 +215,9 @@ function arrowBindingProps(terminal, normalizedAnchor) {
   }
 }
 
-function createMindMapEdge(editor, parent, child, side, edgeStyle, scale) {
+function createMindMapEdge(editor, parent, child, side, edgeStyle, scale, structureId) {
   const edgeId = createShapeId()
+  const anchors = getMindMapConnectionAnchors(structureId, side)
   const parentCenter = {
     x: Number(parent.x) + Number(parent.props?.w || 0) / 2,
     y: Number(parent.y) + (Number(parent.props?.h || 0) + Number(parent.props?.growY || 0)) / 2
@@ -236,13 +252,13 @@ function createMindMapEdge(editor, parent, child, side, edgeStyle, scale) {
       type: 'arrow',
       fromId: edgeId,
       toId: parent.id,
-      props: arrowBindingProps('start', { x: side === 'left' ? 0 : 1, y: 0.5 })
+      props: arrowBindingProps('start', anchors.start)
     },
     {
       type: 'arrow',
       fromId: edgeId,
       toId: child.id,
-      props: arrowBindingProps('end', { x: side === 'left' ? 1 : 0, y: 0.5 })
+      props: arrowBindingProps('end', anchors.end)
     }
   ])
 }
@@ -254,9 +270,15 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
 
   const rootId = getMindMapRootId(graph, parentId)
   const root = graph.nodeById.get(rootId)
+  const structureId = getMindMapStructureId(root)
+  const structure = getMindMapStructureDefinition(structureId)
+  const parentSide = parent.meta?.cowartMindMapSide
   const resolvedSide = graph.parentByChild.has(parentId)
-    ? parent.meta?.cowartMindMapSide === 'left' ? 'left' : 'right'
-    : side === 'left' ? 'left' : 'right'
+    ? parentSide === 'left' || parentSide === 'right' ? parentSide : 'auto'
+    : structure.direction === 'balanced'
+      ? side === 'left' ? 'left' : 'right'
+      : 'auto'
+  const visualSide = structure.direction === 'balanced' ? resolvedSide : structure.direction
   const color = branchColor(graph, parentId, resolvedSide)
   const scale = Number(root?.props?.scale || parent.props?.scale || 1)
   const presetId = getMindMapStylePresetId(root)
@@ -268,10 +290,14 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
   })
   const { w: width, h: height } = getMindMapNodeDimensions(childStyle.depth, scale)
   const siblingCount = (graph.childrenByParent.get(parentId) ?? []).length
-  const provisionalX = resolvedSide === 'left'
-    ? Number(parent.x) - width - MIND_MAP_HORIZONTAL_GAP * scale
-    : Number(parent.x) + Number(parent.props?.w || 0) + MIND_MAP_HORIZONTAL_GAP * scale
-  const provisionalY = Number(parent.y) + siblingCount * (height + MIND_MAP_VERTICAL_GAP * scale)
+  const provisionalX = structure.direction === 'down'
+    ? Number(parent.x) + siblingCount * (width + MIND_MAP_VERTICAL_GAP * scale)
+    : visualSide === 'left'
+      ? Number(parent.x) - width - MIND_MAP_HORIZONTAL_GAP * scale
+      : Number(parent.x) + Number(parent.props?.w || 0) + MIND_MAP_HORIZONTAL_GAP * scale
+  const provisionalY = structure.direction === 'down'
+    ? Number(parent.y) + Number(parent.props?.h || 0) + MIND_MAP_HORIZONTAL_GAP * scale
+    : Number(parent.y) + siblingCount * (height + MIND_MAP_VERTICAL_GAP * scale)
   const nodeId = createShapeId()
 
   editor.markHistoryStoppingPoint('create_mind_map_topic')
@@ -296,7 +322,15 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
       }
     })
     const child = editor.getShape(nodeId)
-    if (child) createMindMapEdge(editor, parent, child, resolvedSide, childStyle.edgeProps, scale)
+    if (child) createMindMapEdge(
+      editor,
+      parent,
+      child,
+      visualSide,
+      childStyle.edgeProps,
+      scale,
+      structureId
+    )
     if (root?.meta?.cowartMindMapAutoLayout !== false) {
       editor.updateShape({
         id: root.id,
@@ -312,7 +346,7 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
 function createMindMapSibling(editor, nodeId) {
   const graph = editorMindMapGraph(editor)
   const parentId = graph.parentByChild.get(nodeId)
-  if (!parentId) return createMindMapTopic(editor, nodeId, { side: 'right' })
+  if (!parentId) return createMindMapTopic(editor, nodeId)
   const node = graph.nodeById.get(nodeId)
   return createMindMapTopic(editor, parentId, {
     afterChildId: nodeId,
@@ -336,6 +370,8 @@ function promoteMindMapNode(editor, nodeId) {
 
   const rootId = getMindMapRootId(graph, nodeId)
   const root = graph.nodeById.get(rootId)
+  const structureId = getMindMapStructureId(root)
+  const structure = getMindMapStructureDefinition(structureId)
   const presetId = getMindMapStylePresetId(root)
   const currentDepth = getMindMapNodeDepth(graph, nodeId)
   const targetDepth = currentDepth - 1
@@ -343,19 +379,32 @@ function promoteMindMapNode(editor, nodeId) {
   const nodeStyleUpdate = depthStyleUpdates.find((update) => update.id === node.id)
   const edgeStyleUpdates = depthStyleUpdates.filter((update) => update.id !== node.id)
   const promotedNodeProps = { ...nodeStyleUpdate?.props }
-  const side = grandparentId === getMindMapRootId(graph, grandparentId)
-    ? node.meta?.cowartMindMapSide === 'left' ? 'left' : 'right'
-    : grandparent.meta?.cowartMindMapSide === 'left' ? 'left' : 'right'
+  const promotedToRoot = grandparentId === getMindMapRootId(graph, grandparentId)
+  const candidateSide = promotedToRoot ? node.meta?.cowartMindMapSide : grandparent.meta?.cowartMindMapSide
+  const side = candidateSide === 'left' || candidateSide === 'right' ? candidateSide : 'auto'
+  const visualSide = structure.direction === 'balanced'
+    ? side === 'left' ? 'left' : 'right'
+    : structure.direction
+  const anchors = getMindMapConnectionAnchors(structureId, visualSide)
 
   editor.markHistoryStoppingPoint('promote_mind_map_topic')
   editor.run(() => {
-    editor.updateBinding({
-      id: relation.startBinding.id,
-      type: relation.startBinding.type,
-      fromId: relation.startBinding.fromId,
-      toId: grandparentId,
-      props: arrowBindingProps('start', { x: side === 'left' ? 0 : 1, y: 0.5 })
-    })
+    editor.updateBindings([
+      {
+        id: relation.startBinding.id,
+        type: relation.startBinding.type,
+        fromId: relation.startBinding.fromId,
+        toId: grandparentId,
+        props: arrowBindingProps('start', anchors.start)
+      },
+      {
+        id: relation.endBinding.id,
+        type: relation.endBinding.type,
+        fromId: relation.endBinding.fromId,
+        toId: node.id,
+        props: arrowBindingProps('end', anchors.end)
+      }
+    ])
     editor.updateShape({
       id: node.id,
       type: node.type,
@@ -395,6 +444,21 @@ function requestMindMapLayout(editor, nodeId) {
     id: root.id,
     type: root.type,
     meta: { ...root.meta, cowartMindMapAutoLayout: true }
+  })
+}
+
+function applyMindMapStructure(editor, rootId, structureId) {
+  const root = editor.getShape(rootId)
+  if (!isMindMapNode(root) || !MIND_MAP_STRUCTURES[structureId]) return
+  editor.markHistoryStoppingPoint('change_mind_map_structure')
+  editor.updateShape({
+    id: root.id,
+    type: root.type,
+    meta: {
+      ...root.meta,
+      cowartMindMapStructure: structureId,
+      cowartMindMapAutoLayout: true
+    }
   })
 }
 
@@ -443,6 +507,7 @@ export class CowartMindMapGeoShapeUtil extends GeoShapeUtil {
 function synchronizeMindMaps(editor) {
   const graph = editorMindMapGraph(editor)
   const updates = []
+  const bindingUpdates = []
 
   for (const edgeId of graph.invalidEdgeIds) {
     const edge = graph.edgeById.get(edgeId)
@@ -471,10 +536,14 @@ function synchronizeMindMaps(editor) {
       includePositions: autoLayout,
       autoLayout
     }))
+    bindingUpdates.push(...createMindMapBindingUpdates(graph, layout))
   }
 
-  if (updates.length) {
-    editor.run(() => editor.updateShapes(updates), { ignoreShapeLock: true })
+  if (updates.length || bindingUpdates.length) {
+    editor.run(() => {
+      if (updates.length) editor.updateShapes(updates)
+      if (bindingUpdates.length) editor.updateBindings(bindingUpdates)
+    }, { ignoreShapeLock: true })
   }
 }
 
@@ -672,6 +741,95 @@ function MindMapStyleChoiceGroup({ disabled = false, label, options, value, onCh
   )
 }
 
+function MindMapStructurePreview({ structureId }) {
+  const structure = getMindMapStructureDefinition(structureId)
+  if (structure.direction === 'down') {
+    return (
+      <svg aria-hidden="true" className="cowart-mind-map-structure-preview" viewBox="0 0 72 38">
+        <path d="M36 13V19M17 19H55M17 19V25M55 19V25" />
+        <rect height="10" rx="2" width="22" x="25" y="3" />
+        <rect height="9" rx="2" width="20" x="7" y="25" />
+        <rect height="9" rx="2" width="20" x="45" y="25" />
+      </svg>
+    )
+  }
+
+  const pointsLeft = structure.direction === 'left'
+  const isBalanced = structure.direction === 'balanced'
+  const rootX = isBalanced ? 26 : pointsLeft ? 48 : 4
+  return (
+    <svg aria-hidden="true" className="cowart-mind-map-structure-preview" viewBox="0 0 72 38">
+      {isBalanced ? (
+        <>
+          <path d="M26 19H17V9M46 19H55V9M26 19H17V29M46 19H55V29" />
+          <rect height="8" rx="2" width="16" x="1" y="5" />
+          <rect height="8" rx="2" width="16" x="55" y="5" />
+          <rect height="8" rx="2" width="16" x="1" y="25" />
+          <rect height="8" rx="2" width="16" x="55" y="25" />
+        </>
+      ) : pointsLeft ? (
+        <>
+          <path d="M48 19H36V9H30M36 19V29H30" />
+          <rect height="8" rx="2" width="20" x="10" y="5" />
+          <rect height="8" rx="2" width="20" x="10" y="25" />
+        </>
+      ) : (
+        <>
+          <path d="M24 19H36V9H42M36 19V29H42" />
+          <rect height="8" rx="2" width="20" x="42" y="5" />
+          <rect height="8" rx="2" width="20" x="42" y="25" />
+        </>
+      )}
+      <rect height="12" rx="2" width="20" x={rootX} y="13" />
+    </svg>
+  )
+}
+
+function MindMapStructurePopover({ selected }) {
+  const editor = useEditor()
+  return (
+    <TldrawUiPopover id={`mind-map-structure-${selected.root.id}`}>
+      <TldrawUiPopoverTrigger>
+        <TldrawUiToolbarButton
+          aria-label="结构"
+          className="cowart-mind-map-toolbar-button"
+          data-testid="mind-map.structures"
+          title="结构"
+          type="icon"
+        >
+          <span aria-hidden="true" className="cowart-mind-map-toolbar-icon">⌘</span>
+          <span className="cowart-mind-map-toolbar-label">结构</span>
+        </TldrawUiToolbarButton>
+      </TldrawUiPopoverTrigger>
+      <TldrawUiPopoverContent align="center" collisionPadding={12} side="top">
+        <div
+          className="cowart-mind-map-structure-panel"
+          data-testid="mind-map.structure-panel"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <div className="cowart-mind-map-style-title">思维导图结构</div>
+          <div className="cowart-mind-map-structure-options">
+            {Object.entries(MIND_MAP_STRUCTURES).map(([structureId, structure]) => (
+              <button
+                aria-label={structure.label}
+                aria-pressed={selected.structureId === structureId}
+                className="cowart-mind-map-structure-option"
+                data-testid={`mind-map.structure.${structureId}`}
+                key={structureId}
+                onClick={() => applyMindMapStructure(editor, selected.root.id, structureId)}
+                type="button"
+              >
+                <MindMapStructurePreview structureId={structureId} />
+                <span>{structure.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </TldrawUiPopoverContent>
+    </TldrawUiPopover>
+  )
+}
+
 function MindMapStylePopover({ selected }) {
   const editor = useEditor()
   const [scope, setScope] = useState('node')
@@ -862,6 +1020,7 @@ function CowartMindMapToolbar() {
         root,
         incomingEdge: incomingEdgeId ? graph.edgeById.get(incomingEdgeId) : null,
         presetId: getMindMapStylePresetId(root),
+        structureId: getMindMapStructureId(root),
         isRoot: !parentId,
         canPromote: Boolean(grandparentId),
         hasChildren: (graph.childrenByParent.get(node.id) ?? []).length > 0,
@@ -884,20 +1043,29 @@ function CowartMindMapToolbar() {
       getSelectionBounds={getSelectionBounds}
       label="思维导图工具栏"
     >
+      <MindMapStructurePopover selected={selected} />
       <MindMapStylePopover selected={selected} />
       {selected.isRoot ? (
-        <>
+        getMindMapStructureDefinition(selected.structureId).direction === 'balanced' ? (
+          <>
+            <MindMapToolbarButton
+              icon="＋←"
+              label="左分支"
+              onClick={() => createMindMapTopic(editor, selected.node.id, { side: 'left' })}
+            />
+            <MindMapToolbarButton
+              icon="→＋"
+              label="右分支"
+              onClick={() => createMindMapTopic(editor, selected.node.id, { side: 'right' })}
+            />
+          </>
+        ) : (
           <MindMapToolbarButton
-            icon="＋←"
-            label="左分支"
-            onClick={() => createMindMapTopic(editor, selected.node.id, { side: 'left' })}
+            icon="＋"
+            label="子主题"
+            onClick={() => createMindMapTopic(editor, selected.node.id)}
           />
-          <MindMapToolbarButton
-            icon="→＋"
-            label="右分支"
-            onClick={() => createMindMapTopic(editor, selected.node.id, { side: 'right' })}
-          />
-        </>
+        )
       ) : (
         <>
           <MindMapToolbarButton
@@ -939,10 +1107,13 @@ function CowartMindMapCollapseBadges() {
         const count = getMindMapDescendantIds(graph, node.id).length
         const bounds = editor.getShapePageBounds(node.id)
         if (!count || !bounds) continue
-        const side = node.meta?.cowartMindMapSide
+        const root = graph.nodeById.get(getMindMapRootId(graph, node.id))
+        const structureId = getMindMapStructureId(root)
+        const direction = getMindMapStructureDefinition(structureId).direction
+        const side = direction === 'balanced' ? node.meta?.cowartMindMapSide : direction
         const screenPoint = editor.pageToScreen({
-          x: side === 'left' ? bounds.minX : bounds.maxX,
-          y: bounds.center.y
+          x: side === 'down' ? bounds.center.x : side === 'left' ? bounds.minX : bounds.maxX,
+          y: side === 'down' ? bounds.maxY : bounds.center.y
         })
         items.push({ id: node.id, count, x: screenPoint.x, y: screenPoint.y })
       }

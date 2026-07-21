@@ -100,9 +100,10 @@ canvas/pages/<page-id>/assets/
 
 1. Select `思维导图` in the toolbar to create a central topic in the current viewport.
 2. Select a topic and press `Tab` for a child or `Enter` for a sibling. While editing, use `Shift+Enter` for a new line and `Shift+Tab` to promote the current topic by one level.
-3. The central topic toolbar can add left and right branches separately. Any topic with children can be collapsed; its badge shows how many descendants are hidden.
-4. Select `样式` in the floating toolbar to style the current topic, current branch, or full map. Choose the `清爽`, `卡片`, or `手绘` theme, or customize color, fill, shape, font, outline, and connectors. Select `恢复默认样式` to restore the default theme and branch palette.
-5. Dragging a topic moves its full subtree and switches the map to manual layout. Select `整理布局` to restore the bidirectional automatic layout.
+3. Select `结构` in the floating toolbar to switch between a bidirectional map, right-facing logic chart, left-facing logic chart, and top-down organization chart. Structure changes layout only; it does not change themes, colors, or topic styles.
+4. The central topic can add separate left and right branches in the bidirectional structure; the other structures use a single child-topic action. Any topic with children can be collapsed, and its badge shows how many descendants are hidden.
+5. Select `样式` in the floating toolbar to style the current topic, current branch, or full map. Choose the `清爽`, `卡片`, or `手绘` theme, or customize color, fill, shape, font, outline, and connectors. Select `恢复默认样式` to restore the default theme and branch palette.
+6. Dragging a topic moves its full subtree and switches the map to manual layout. Select `整理布局` to restore automatic layout with the currently selected structure.
 
 Copying a single topic includes its complete branch and connectors. Deleting a topic also deletes every descendant. Mind maps are stored as standard tldraw shapes, arrows, and bindings, so undo, redo, persistence, and export keep using the canvas's native behavior.
 

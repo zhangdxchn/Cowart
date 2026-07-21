@@ -2,13 +2,16 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  DEFAULT_MIND_MAP_STRUCTURE_ID,
   DEFAULT_MIND_MAP_STYLE_PRESET_ID,
+  MIND_MAP_STRUCTURES,
   MIND_MAP_STYLE_PRESETS,
   buildMindMapGraph,
   collectMindMapBranchRecordIds,
   collectMindMapCascadeShapeIds,
   collectMindMapStyleTargets,
   computeMindMapLayout,
+  createMindMapBindingUpdates,
   createMindMapDepthStyleUpdates,
   createMindMapEdgeAtomically,
   createMindMapLayoutUpdates,
@@ -16,11 +19,14 @@ import {
   createMindMapStyleUpdates,
   createMindMapTranslationUpdates,
   getMindMapChildStyle,
+  getMindMapConnectionAnchors,
   getMindMapDescendantIds,
   getMindMapNodeDimensions,
   getMindMapPresetEdgeProps,
   getMindMapPresetNodeProps,
-  getMindMapRootId
+  getMindMapRootId,
+  getMindMapStructureDefinition,
+  getMindMapStructureId
 } from './mindMapModel.js'
 
 test('createMindMapEdgeAtomically publishes a connected edge in one store operation', () => {
@@ -166,6 +172,37 @@ test('mind-map presets expose a stronger default hierarchy', () => {
   assert.equal(getMindMapPresetEdgeProps('balanced', 2, 'orange').size, 's')
   assert.equal(getMindMapPresetNodeProps('cards', 1, 'orange').labelColor, 'black')
   assert.equal(getMindMapPresetNodeProps('cards', 1, 'blue').labelColor, 'white')
+})
+
+test('mind-map structures default old canvases to balanced and expose directional anchors', () => {
+  assert.equal(DEFAULT_MIND_MAP_STRUCTURE_ID, 'balanced')
+  assert.deepEqual(Object.keys(MIND_MAP_STRUCTURES), ['balanced', 'right', 'left', 'org-down'])
+  assert.equal(getMindMapStructureId(node('shape:legacy-root')), 'balanced')
+
+  const root = node('shape:root')
+  root.meta.cowartMindMapStructure = 'org-down'
+  assert.equal(getMindMapStructureId(root), 'org-down')
+  root.meta.cowartMindMapStructure = 'unknown'
+  assert.equal(getMindMapStructureId(root), 'balanced')
+  assert.deepEqual(getMindMapStructureDefinition('org-down'), {
+    label: '组织结构图',
+    direction: 'down',
+    layout: 'vertical'
+  })
+  assert.equal(getMindMapStructureDefinition('unknown'), MIND_MAP_STRUCTURES.balanced)
+
+  assert.deepEqual(getMindMapConnectionAnchors('balanced', 'left'), {
+    start: { x: 0, y: 0.5 },
+    end: { x: 1, y: 0.5 }
+  })
+  assert.deepEqual(getMindMapConnectionAnchors('right', 'right'), {
+    start: { x: 1, y: 0.5 },
+    end: { x: 0, y: 0.5 }
+  })
+  assert.deepEqual(getMindMapConnectionAnchors('org-down', 'down'), {
+    start: { x: 0.5, y: 1 },
+    end: { x: 0.5, y: 0 }
+  })
 })
 
 test('collectMindMapStyleTargets resolves node, branch, and map scopes with incoming edges', () => {
@@ -359,6 +396,98 @@ test('computeMindMapLayout lays out variable-height branches on both sides witho
   assert.equal(right.side, 'right')
   assert.ok(leftA.y + 40 + 28 <= leftB.y)
   assert.equal(layout.hiddenNodeIds.size, 0)
+})
+
+test('computeMindMapLayout supports left-only and right-only structures without moving the root', () => {
+  const fixture = graphFixture()
+  const graph = buildMindMapGraph(fixture)
+  const rootShape = graph.nodeById.get('shape:root')
+
+  for (const structureId of ['left', 'right']) {
+    const layout = computeMindMapLayout(graph, rootShape.id, {
+      structureId,
+      horizontalGap: 96,
+      verticalGap: 28
+    })
+    assert.equal(layout.structureId, structureId)
+    assert.deepEqual(layout.positions.get(rootShape.id), {
+      x: rootShape.x,
+      y: rootShape.y,
+      side: 'center',
+      depth: 0
+    })
+    for (const nodeId of getMindMapDescendantIds(graph, rootShape.id)) {
+      assert.equal(layout.sides.get(nodeId), structureId)
+      const position = layout.positions.get(nodeId)
+      const parent = graph.nodeById.get(graph.parentByChild.get(nodeId))
+      const parentPosition = layout.positions.get(parent.id)
+      if (structureId === 'left') {
+        assert.ok(position.x + graph.nodeById.get(nodeId).props.w < parentPosition.x)
+      } else {
+        assert.ok(position.x > parentPosition.x + parent.props.w)
+      }
+    }
+  }
+})
+
+test('computeMindMapLayout lays out an organization chart in non-overlapping rows', () => {
+  const fixture = graphFixture()
+  const rootShape = fixture.shapes.find((shape) => shape.id === 'shape:root')
+  rootShape.meta.cowartMindMapStructure = 'org-down'
+  const graph = buildMindMapGraph(fixture)
+  const layout = computeMindMapLayout(graph, rootShape.id, { horizontalGap: 96, verticalGap: 28 })
+
+  assert.equal(layout.structureId, 'org-down')
+  assert.deepEqual(layout.positions.get(rootShape.id), {
+    x: rootShape.x,
+    y: rootShape.y,
+    side: 'center',
+    depth: 0
+  })
+  for (const nodeId of getMindMapDescendantIds(graph, rootShape.id)) {
+    const nodeShape = graph.nodeById.get(nodeId)
+    const position = layout.positions.get(nodeId)
+    const parent = graph.nodeById.get(graph.parentByChild.get(nodeId))
+    const parentPosition = layout.positions.get(parent.id)
+    assert.equal(layout.sides.get(nodeId), 'down')
+    assert.ok(position.y >= parentPosition.y + parent.props.h + 96)
+    assert.ok(Number.isFinite(position.x))
+    assert.ok(Number.isFinite(nodeShape.props.w))
+  }
+
+  const leftA = layout.positions.get('shape:left-a')
+  const leftB = layout.positions.get('shape:left-b')
+  assert.ok(leftA.x + graph.nodeById.get('shape:left-a').props.w + 28 <= leftB.x)
+})
+
+test('createMindMapBindingUpdates follows the selected structure without rewriting saved side preferences', () => {
+  const fixture = graphFixture()
+  const graph = buildMindMapGraph(fixture)
+  const layout = computeMindMapLayout(graph, 'shape:root', { structureId: 'org-down' })
+  const bindingUpdates = createMindMapBindingUpdates(graph, layout)
+  const byId = new Map(bindingUpdates.map((update) => [update.id, update]))
+
+  assert.deepEqual(byId.get('binding:shape:edge-left:start').props.normalizedAnchor, { x: 0.5, y: 1 })
+  assert.deepEqual(byId.get('binding:shape:edge-left:end').props.normalizedAnchor, { x: 0.5, y: 0 })
+  assert.equal(bindingUpdates.length, layout.edgeIds.size * 2)
+
+  const shapeUpdates = createMindMapLayoutUpdates(graph, layout)
+  const shapeById = new Map(shapeUpdates.map((update) => [update.id, update]))
+  assert.equal(shapeById.get('shape:left').meta.cowartMindMapSide, 'left')
+  assert.equal(shapeById.get('shape:right').meta.cowartMindMapSide, 'right')
+})
+
+test('non-balanced layout repairs a transient child root side without discarding valid preferences', () => {
+  const fixture = graphFixture()
+  fixture.shapes.find((shape) => shape.id === 'shape:left-a').meta.cowartMindMapSide = 'center'
+  const graph = buildMindMapGraph(fixture)
+  const layout = computeMindMapLayout(graph, 'shape:root', { structureId: 'org-down' })
+  const updates = createMindMapLayoutUpdates(graph, layout)
+  const byId = new Map(updates.map((update) => [update.id, update]))
+
+  assert.equal(byId.get('shape:left').meta.cowartMindMapSide, 'left')
+  assert.equal(byId.get('shape:right').meta.cowartMindMapSide, 'right')
+  assert.equal(byId.get('shape:left-a').meta.cowartMindMapSide, 'auto')
 })
 
 test('computeMindMapLayout hides every descendant and relation below a collapsed node', () => {
