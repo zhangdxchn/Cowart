@@ -85,6 +85,16 @@ import {
   isCanvasSnapshot,
   sanitizeCanvasSnapshotForTldraw
 } from './canvasSnapshot.js'
+import {
+  CowartMindMapGeoShapeUtil,
+  CowartMindMapOverlay,
+  MIND_MAP_TOOL_ID,
+  MIND_MAP_TOOL_LABEL,
+  createMindMapToolDefinition,
+  expandMindMapClipboardContent,
+  getMindMapShapeVisibility,
+  installMindMapLifecycle
+} from './mindMapFeature.jsx'
 
 const SELECTION_STATE_ELEMENT_ID = 'cowart-selection-state'
 const PAGE_ASSETS_ROUTE = '/page-assets/'
@@ -836,7 +846,8 @@ function normalizeAiDraftHolderLabels(editor) {
 function copySelectedCowartContent(editor, event) {
   if (!event.clipboardData || editor.getEditingShapeId() !== null) return false
 
-  const content = editor.getContentFromCurrentPage(editor.getSelectedShapeIds())
+  const selectedContent = editor.getContentFromCurrentPage(editor.getSelectedShapeIds())
+  const content = expandMindMapClipboardContent(editor, selectedContent)
   if (!content) return false
 
   const copiedContent = structuredClone(content)
@@ -927,7 +938,9 @@ function movePastedItemsIntoAiSlides(editor) {
 
 const cowartTldrawOptions = {
   onBeforeCopyToClipboard({ editor, content }) {
-    cowartCopiedContent.set(editor, structuredClone(content))
+    const expandedContent = expandMindMapClipboardContent(editor, content)
+    cowartCopiedContent.set(editor, structuredClone(expandedContent))
+    return expandedContent
   },
   onBeforePasteFromClipboard({ editor }) {
     rememberAiSlidesPasteTarget(editor)
@@ -3130,7 +3143,7 @@ class CowartEmbedShapeUtil extends CowartConfiguredEmbedShapeUtil {
   }
 }
 
-const cowartShapeUtils = [CowartFrameShapeUtil, CowartEmbedShapeUtil]
+const cowartShapeUtils = [CowartMindMapGeoShapeUtil, CowartFrameShapeUtil, CowartEmbedShapeUtil]
 
 const cowartUiOverrides = {
   actions(editor, actions, helpers) {
@@ -3174,12 +3187,14 @@ const cowartUiOverrides = {
       'tool.ai-image': AI_IMAGE_HOLDER_LABEL,
       'tool.ai-draft': AI_DRAFT_HOLDER_LABEL,
       'tool.ai-slides': AI_SLIDES_LABEL,
+      'tool.mind-map': MIND_MAP_TOOL_LABEL,
       'tool.cowart-annotation': ANNOTATION_TOOL_LABEL
     },
     'zh-cn': {
       'tool.ai-image': AI_IMAGE_HOLDER_LABEL,
       'tool.ai-draft': AI_DRAFT_HOLDER_LABEL,
       'tool.ai-slides': AI_SLIDES_LABEL,
+      'tool.mind-map': MIND_MAP_TOOL_LABEL,
       'tool.cowart-annotation': ANNOTATION_TOOL_LABEL
     }
   },
@@ -3263,6 +3278,7 @@ const cowartUiOverrides = {
           cowartTool: 'ai-slides'
         }
       },
+      [MIND_MAP_TOOL_ID]: createMindMapToolDefinition(editor),
       [ANNOTATION_TOOL_ID]: {
         id: ANNOTATION_TOOL_ID,
         label: 'tool.cowart-annotation',
@@ -3290,6 +3306,7 @@ const cowartComponents = {
 function CowartCanvasOverlay() {
   return (
     <>
+      <CowartMindMapOverlay />
       <CowartAiImageGenerationPanel />
       <CowartAiDraftGenerationPanel />
       <CowartAiSlidesGenerationPanel />
@@ -5541,7 +5558,7 @@ function CowartToolbarDivider() {
 
 function CowartToolbar(props) {
   return (
-    <DefaultToolbar {...props} maxItems={11}>
+    <DefaultToolbar {...props} maxItems={12}>
       <CowartAnnotationToolbarItem />
       <CowartToolbarDivider />
       <SelectToolbarItem />
@@ -5549,6 +5566,7 @@ function CowartToolbar(props) {
       <CowartToolbarItem toolId={AI_IMAGE_TOOL_ID} />
       <CowartToolbarItem toolId={AI_DRAFT_TOOL_ID} />
       <CowartToolbarItem toolId={AI_SLIDES_TOOL_ID} />
+      <CowartToolbarItem toolId={MIND_MAP_TOOL_ID} />
       <CowartToolbarDivider />
       <AssetToolbarItem />
       <DrawToolbarItem />
@@ -5701,6 +5719,7 @@ export default function App() {
     window.__cowartEditor = editor
     window.__cowartSelection = () => getCowartSelection(editor)
     window.__cowartViewState = () => getCowartViewState(editor)
+    const disposeMindMapLifecycle = installMindMapLifecycle(editor)
     let lastSyncedSelectionState = ''
     let isSelectionStateSaving = false
     let hasPendingSelectionState = false
@@ -6019,6 +6038,7 @@ export default function App() {
       containerDocument.removeEventListener('copy', handleCowartCopy, { capture: true })
       disposeSlidesBeforeCreateHandler()
       disposeSlidesOperationHandler()
+      disposeMindMapLifecycle()
       syncViewState()
       saveCanvas()
     }
@@ -6048,6 +6068,7 @@ export default function App() {
         assetUrls={cowartAssetUrls}
         assets={cowartTldrawAssetStore}
         inferDarkMode
+        getShapeVisibility={getMindMapShapeVisibility}
         onMount={handleMount}
         options={cowartTldrawOptions}
         overrides={cowartUiOverrides}

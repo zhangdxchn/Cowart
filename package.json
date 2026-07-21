@@ -9,7 +9,8 @@
     "build": "node ./scripts/vite-build-once.mjs",
     "preview": "vite preview",
     "probe:mcp": "node ./scripts/probe-mcp.mjs",
-    "quality": "npm run check && npm run build && npm run probe:mcp"
+    "test": "node --test ./src/mindMapModel.test.js",
+    "quality": "npm run check && npm test && npm run build && npm run probe:mcp"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^1.7.4",

@@ -167,6 +167,73 @@ body {
   height: 100%;
 }
 
+.cowart-mind-map-tool-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+.cowart-mind-map-toolbar {
+  display: flex;
+  width: max-content;
+  max-width: min(620px, calc(100vw - 32px));
+  gap: 2px;
+  overflow-x: auto;
+}
+
+.cowart-mind-map-toolbar-button {
+  width: auto;
+  min-width: 62px;
+  padding: 0 9px;
+  gap: 4px;
+}
+
+.cowart-mind-map-toolbar-icon {
+  position: relative;
+  z-index: 1;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.cowart-mind-map-toolbar-label {
+  position: relative;
+  z-index: 1;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.cowart-mind-map-collapse-badge {
+  position: absolute;
+  z-index: 500;
+  display: grid;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  place-items: center;
+  pointer-events: auto;
+  color: #fff;
+  font: 700 11px/1 Inter, ui-sans-serif, system-ui, sans-serif;
+  background: #2563eb;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 24%);
+  cursor: pointer;
+  transform: translate(-50%, -50%);
+}
+
+.cowart-mind-map-collapse-badge:hover {
+  background: #1d4ed8;
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
 .cowart-annotation-html-toolbar-button .cowart-ai-frame-tool-icon,
 .cowart-html-draft-toolbar-button .cowart-ai-frame-tool-icon {
   width: 15px;

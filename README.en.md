@@ -8,6 +8,7 @@ Cowart is a native infinite-canvas widget plugin for Codex. It brings a tldraw-p
 
 - Open a native tldraw infinite-canvas widget from Codex; normal use no longer opens a local page through a web browser or the in-app browser.
 - Persist canvas pages and image assets in the active project directory.
+- Create editable, bidirectional mind maps with keyboard expansion, branch collapsing, subtree moves, and automatic arrangement.
 - Create AI image slots on the canvas, enter a prompt directly, choose reference images, and let Codex generate an image that replaces the selected slot at the same position and aspect ratio.
 - Create a 16:9 `AI HTML` slot, generate a runnable single-file HTML page from a prompt and reference images, and embed it directly on the canvas for further editing and iteration.
 - Create `AI Slides` to organize images and HTML into a deck, or ask Codex to generate a specified number of coordinated 16:9 HTML pages; preview the deck with thumbnails or play it fullscreen.
@@ -95,6 +96,15 @@ canvas/pages/<page-id>/assets/
 
 ![Open Cowart canvas in Codex](assets/open-canvas.png)
 
+### Create A Mind Map
+
+1. Select `思维导图` in the toolbar to create a central topic in the current viewport.
+2. Select a topic and press `Tab` for a child or `Enter` for a sibling. While editing, use `Shift+Enter` for a new line and `Shift+Tab` to promote the current topic by one level.
+3. The central topic toolbar can add left and right branches separately. Any topic with children can be collapsed; its badge shows how many descendants are hidden.
+4. Dragging a topic moves its full subtree and switches the map to manual layout. Select `整理布局` to restore the bidirectional automatic layout.
+
+Copying a single topic includes its complete branch and connectors. Deleting a topic also deletes every descendant. Mind maps are stored as standard tldraw shapes, arrows, and bindings, so undo, redo, persistence, and export keep using the canvas's native behavior.
+
 ### Generate A New Image
 
 1. Open the Cowart canvas.
@@ -146,6 +156,7 @@ Codex reads the notes and arrows in the screenshot, generates a clean revised im
 ```bash
 npm install
 npm run dev
+npm test
 npm run build
 ```
 
