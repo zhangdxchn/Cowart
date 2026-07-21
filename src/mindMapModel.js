@@ -2,6 +2,15 @@ export const MIND_MAP_NODE_META_KEY = 'cowartMindMapNode'
 export const MIND_MAP_EDGE_META_KEY = 'cowartMindMapEdge'
 export const MIND_MAP_VERSION = 1
 
+export function createMindMapEdgeAtomically(editor, edgeShape, bindings) {
+  editor.store.atomic(() => {
+    editor.createShape(edgeShape)
+    editor.createBindings(bindings)
+    editor.updateShape({ id: edgeShape.id, type: edgeShape.type, isLocked: true })
+  })
+  return edgeShape.id
+}
+
 export function isMindMapNode(shape) {
   return shape?.typeName === 'shape' && shape.type === 'geo' && shape.meta?.[MIND_MAP_NODE_META_KEY] === true
 }
@@ -124,6 +133,15 @@ export function collectMindMapBranchRecordIds(graph, nodeId) {
   }
 
   return [...recordIds]
+}
+
+export function collectMindMapCascadeShapeIds(graph, nodeId) {
+  const shapeIds = new Set(
+    collectMindMapBranchRecordIds(graph, nodeId).filter((recordId) => recordId.startsWith('shape:'))
+  )
+  const incomingEdgeId = graph.edgeByChild.get(nodeId)
+  if (incomingEdgeId) shapeIds.add(incomingEdgeId)
+  return [...shapeIds]
 }
 
 export function createMindMapTranslationUpdates(graph, initial, current, selectedShapeIds = new Set()) {

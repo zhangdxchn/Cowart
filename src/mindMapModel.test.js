@@ -4,11 +4,56 @@ import test from 'node:test'
 import {
   buildMindMapGraph,
   collectMindMapBranchRecordIds,
+  collectMindMapCascadeShapeIds,
   computeMindMapLayout,
+  createMindMapEdgeAtomically,
   createMindMapLayoutUpdates,
   createMindMapTranslationUpdates,
   getMindMapDescendantIds
 } from './mindMapModel.js'
+
+test('createMindMapEdgeAtomically publishes a connected edge in one store operation', () => {
+  const operations = []
+  let atomicDepth = 0
+  const editor = {
+    store: {
+      atomic(operation) {
+        operations.push('atomic:start')
+        atomicDepth += 1
+        operation()
+        atomicDepth -= 1
+        operations.push('atomic:end')
+        operations.push('operation:complete')
+      }
+    },
+    createShape(shape) {
+      assert.equal(atomicDepth, 1)
+      operations.push(`shape:${shape.id}`)
+    },
+    createBindings(bindings) {
+      assert.equal(atomicDepth, 1)
+      operations.push(`bindings:${bindings.length}`)
+    },
+    updateShape(shape) {
+      assert.equal(atomicDepth, 1)
+      operations.push(`lock:${shape.id}:${shape.isLocked}`)
+    }
+  }
+  const edgeShape = { id: 'shape:edge', type: 'arrow' }
+  const bindings = [{ type: 'arrow' }, { type: 'arrow' }]
+
+  const edgeId = createMindMapEdgeAtomically(editor, edgeShape, bindings)
+
+  assert.equal(edgeId, edgeShape.id)
+  assert.deepEqual(operations, [
+    'atomic:start',
+    'shape:shape:edge',
+    'bindings:2',
+    'lock:shape:edge:true',
+    'atomic:end',
+    'operation:complete'
+  ])
+})
 
 function node(id, { x = 0, y = 0, w = 160, h = 48, order = 'a0', side = null, collapsed = false } = {}) {
   return {
@@ -146,6 +191,31 @@ test('collectMindMapBranchRecordIds includes descendant nodes, edges, and their 
       'binding:shape:edge-left-a:start',
       'binding:shape:edge-left-b:end',
       'binding:shape:edge-left-b:start',
+      'shape:edge-left-a',
+      'shape:edge-left-b',
+      'shape:left',
+      'shape:left-a',
+      'shape:left-b'
+    ].sort()
+  )
+})
+
+test('collectMindMapCascadeShapeIds preserves the incoming edge from the last complete graph', () => {
+  const fixture = graphFixture()
+  const completeGraph = buildMindMapGraph(fixture)
+  const bindingsAfterTldrawCleanup = fixture.bindings.filter(
+    (binding) => binding.id !== 'binding:shape:edge-left:end'
+  )
+  const graphDuringDelete = buildMindMapGraph({
+    shapes: fixture.shapes,
+    bindings: bindingsAfterTldrawCleanup
+  })
+
+  assert.equal(graphDuringDelete.edgeByChild.has('shape:left'), false)
+  assert.deepEqual(
+    collectMindMapCascadeShapeIds(completeGraph, 'shape:left').sort(),
+    [
+      'shape:edge-left',
       'shape:edge-left-a',
       'shape:edge-left-b',
       'shape:left',

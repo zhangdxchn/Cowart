@@ -16,7 +16,9 @@ import {
   MIND_MAP_VERSION,
   buildMindMapGraph,
   collectMindMapBranchRecordIds,
+  collectMindMapCascadeShapeIds,
   computeMindMapLayout,
+  createMindMapEdgeAtomically,
   createMindMapLayoutUpdates,
   createMindMapTranslationUpdates,
   getMindMapDescendantIds,
@@ -175,7 +177,7 @@ function createMindMapEdge(editor, parent, child, side, color, scale) {
     y: Number(child.y) + (Number(child.props?.h || 0) + Number(child.props?.growY || 0)) / 2
   }
 
-  editor.createShape({
+  return createMindMapEdgeAtomically(editor, {
     id: edgeId,
     type: 'arrow',
     x: parentCenter.x,
@@ -199,8 +201,7 @@ function createMindMapEdge(editor, parent, child, side, color, scale) {
       richText: toRichText(''),
       scale
     }
-  })
-  editor.createBindings([
+  }, [
     {
       type: 'arrow',
       fromId: edgeId,
@@ -214,8 +215,6 @@ function createMindMapEdge(editor, parent, child, side, color, scale) {
       props: arrowBindingProps('end', { x: side === 'left' ? 1 : 0, y: 0.5 })
     }
   ])
-  editor.updateShape({ id: edgeId, type: 'arrow', isLocked: true })
-  return edgeId
 }
 
 function createMindMapTopic(editor, parentId, { afterChildId = null, side = null, label = '子主题' } = {}) {
@@ -440,6 +439,7 @@ export function installMindMapLifecycle(editor) {
   let dirty = true
   let isSynchronizing = false
   let isCascadingDelete = false
+  let lastCompleteGraph = editorMindMapGraph(editor)
   const pendingCascadeDeletes = new Map()
 
   const markDirty = () => {
@@ -453,11 +453,13 @@ export function installMindMapLifecycle(editor) {
   })
   const disposeShapeBeforeDelete = editor.sideEffects.registerBeforeDeleteHandler('shape', (shape) => {
     if (isCascadingDelete || !isMindMapNode(shape)) return
-    const graph = editorMindMapGraph(editor)
-    const recordIds = collectMindMapBranchRecordIds(graph, shape.id)
-    const incomingEdgeId = graph.edgeByChild.get(shape.id)
-    if (incomingEdgeId) recordIds.push(incomingEdgeId)
-    pendingCascadeDeletes.set(shape.id, recordIds.filter((recordId) => recordId.startsWith('shape:')))
+    const liveGraph = editorMindMapGraph(editor)
+    pendingCascadeDeletes.set(shape.id, [
+      ...new Set([
+        ...collectMindMapCascadeShapeIds(lastCompleteGraph, shape.id),
+        ...collectMindMapCascadeShapeIds(liveGraph, shape.id)
+      ])
+    ])
   })
   const disposeShapeDelete = editor.sideEffects.registerAfterDeleteHandler('shape', (shape) => {
     markDirty()
@@ -483,6 +485,7 @@ export function installMindMapLifecycle(editor) {
     isSynchronizing = true
     try {
       synchronizeMindMaps(editor)
+      lastCompleteGraph = editorMindMapGraph(editor)
     } finally {
       isSynchronizing = false
     }
@@ -492,6 +495,7 @@ export function installMindMapLifecycle(editor) {
     isSynchronizing = true
     try {
       editor.run(() => synchronizeMindMaps(editor), { history: 'ignore', ignoreShapeLock: true })
+      lastCompleteGraph = editorMindMapGraph(editor)
       dirty = false
     } finally {
       isSynchronizing = false
