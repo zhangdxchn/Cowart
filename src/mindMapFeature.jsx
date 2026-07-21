@@ -28,10 +28,10 @@ import {
   computeMindMapLayout,
   createMindMapBindingUpdates,
   createMindMapDepthStyleUpdates,
-  createMindMapEdgeAtomically,
   createMindMapLayoutUpdates,
   createMindMapPresetUpdates,
   createMindMapStyleUpdates,
+  createMindMapTopicAtomically,
   createMindMapTranslationUpdates,
   getMindMapChildStyle,
   getMindMapConnectionAnchors,
@@ -45,7 +45,8 @@ import {
   getMindMapStructureId,
   getMindMapStylePresetId,
   isMindMapEdge,
-  isMindMapNode
+  isMindMapNode,
+  resolveMindMapChildPlacement
 } from './mindMapModel.js'
 
 export const MIND_MAP_TOOL_ID = 'mind-map'
@@ -215,7 +216,7 @@ function arrowBindingProps(terminal, normalizedAnchor) {
   }
 }
 
-function createMindMapEdge(editor, parent, child, side, edgeStyle, scale, structureId) {
+function createMindMapEdgeRecords(parent, child, side, edgeStyle, scale, structureId) {
   const edgeId = createShapeId()
   const anchors = getMindMapConnectionAnchors(structureId, side)
   const parentCenter = {
@@ -227,7 +228,7 @@ function createMindMapEdge(editor, parent, child, side, edgeStyle, scale, struct
     y: Number(child.y) + (Number(child.props?.h || 0) + Number(child.props?.growY || 0)) / 2
   }
 
-  return createMindMapEdgeAtomically(editor, {
+  const edgeShape = {
     id: edgeId,
     type: 'arrow',
     x: parentCenter.x,
@@ -247,7 +248,8 @@ function createMindMapEdge(editor, parent, child, side, edgeStyle, scale, struct
       richText: toRichText(''),
       scale
     }
-  }, [
+  }
+  const bindings = [
     {
       type: 'arrow',
       fromId: edgeId,
@@ -260,7 +262,8 @@ function createMindMapEdge(editor, parent, child, side, edgeStyle, scale, struct
       toId: child.id,
       props: arrowBindingProps('end', anchors.end)
     }
-  ])
+  ]
+  return { edgeShape, bindings }
 }
 
 function createMindMapTopic(editor, parentId, { afterChildId = null, side = null, label = '子主题' } = {}) {
@@ -272,13 +275,12 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
   const root = graph.nodeById.get(rootId)
   const structureId = getMindMapStructureId(root)
   const structure = getMindMapStructureDefinition(structureId)
-  const parentSide = parent.meta?.cowartMindMapSide
-  const resolvedSide = graph.parentByChild.has(parentId)
-    ? parentSide === 'left' || parentSide === 'right' ? parentSide : 'auto'
-    : structure.direction === 'balanced'
-      ? side === 'left' ? 'left' : 'right'
-      : 'auto'
-  const visualSide = structure.direction === 'balanced' ? resolvedSide : structure.direction
+  const { savedSide: resolvedSide, visualDirection: visualSide } = resolveMindMapChildPlacement({
+    structureId,
+    parentIsRoot: !graph.parentByChild.has(parentId),
+    parentSide: parent.meta?.cowartMindMapSide,
+    requestedSide: side
+  })
   const color = branchColor(graph, parentId, resolvedSide)
   const scale = Number(root?.props?.scale || parent.props?.scale || 1)
   const presetId = getMindMapStylePresetId(root)
@@ -299,45 +301,44 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
     ? Number(parent.y) + Number(parent.props?.h || 0) + MIND_MAP_HORIZONTAL_GAP * scale
     : Number(parent.y) + siblingCount * (height + MIND_MAP_VERTICAL_GAP * scale)
   const nodeId = createShapeId()
-
-  editor.markHistoryStoppingPoint('create_mind_map_topic')
-  editor.run(() => {
-    editor.createShape({
-      id: nodeId,
-      type: 'geo',
-      x: provisionalX,
-      y: provisionalY,
-      meta: mindMapNodeMeta({
-        order: nextChildOrder(graph, parentId, afterChildId),
-        side: resolvedSide
-      }),
-      props: {
-        w: width,
-        h: height,
-        ...childStyle.nodeProps,
-        align: 'middle',
-        verticalAlign: 'middle',
-        richText: toRichText(label),
-        scale
-      }
-    })
-    const child = editor.getShape(nodeId)
-    if (child) createMindMapEdge(
-      editor,
-      parent,
-      child,
-      visualSide,
-      childStyle.edgeProps,
-      scale,
-      structureId
-    )
-    if (root?.meta?.cowartMindMapAutoLayout !== false) {
-      editor.updateShape({
+  const nodeShape = {
+    id: nodeId,
+    type: 'geo',
+    x: provisionalX,
+    y: provisionalY,
+    meta: mindMapNodeMeta({
+      order: nextChildOrder(graph, parentId, afterChildId),
+      side: resolvedSide
+    }),
+    props: {
+      w: width,
+      h: height,
+      ...childStyle.nodeProps,
+      align: 'middle',
+      verticalAlign: 'middle',
+      richText: toRichText(label),
+      scale
+    }
+  }
+  const { edgeShape, bindings } = createMindMapEdgeRecords(
+    parent,
+    nodeShape,
+    visualSide,
+    childStyle.edgeProps,
+    scale,
+    structureId
+  )
+  const rootUpdate = root?.meta?.cowartMindMapAutoLayout !== false
+    ? {
         id: root.id,
         type: root.type,
         meta: { ...root.meta, cowartMindMapAutoLayout: true }
-      })
-    }
+      }
+    : null
+
+  editor.markHistoryStoppingPoint('create_mind_map_topic')
+  editor.run(() => {
+    createMindMapTopicAtomically(editor, nodeShape, edgeShape, bindings, rootUpdate)
   })
   startEditingMindMapNode(editor, nodeId)
   return nodeId
@@ -371,7 +372,6 @@ function promoteMindMapNode(editor, nodeId) {
   const rootId = getMindMapRootId(graph, nodeId)
   const root = graph.nodeById.get(rootId)
   const structureId = getMindMapStructureId(root)
-  const structure = getMindMapStructureDefinition(structureId)
   const presetId = getMindMapStylePresetId(root)
   const currentDepth = getMindMapNodeDepth(graph, nodeId)
   const targetDepth = currentDepth - 1
@@ -380,11 +380,12 @@ function promoteMindMapNode(editor, nodeId) {
   const edgeStyleUpdates = depthStyleUpdates.filter((update) => update.id !== node.id)
   const promotedNodeProps = { ...nodeStyleUpdate?.props }
   const promotedToRoot = grandparentId === getMindMapRootId(graph, grandparentId)
-  const candidateSide = promotedToRoot ? node.meta?.cowartMindMapSide : grandparent.meta?.cowartMindMapSide
-  const side = candidateSide === 'left' || candidateSide === 'right' ? candidateSide : 'auto'
-  const visualSide = structure.direction === 'balanced'
-    ? side === 'left' ? 'left' : 'right'
-    : structure.direction
+  const { savedSide: side, visualDirection: visualSide } = resolveMindMapChildPlacement({
+    structureId,
+    parentIsRoot: promotedToRoot,
+    parentSide: grandparent.meta?.cowartMindMapSide,
+    requestedSide: node.meta?.cowartMindMapSide
+  })
   const anchors = getMindMapConnectionAnchors(structureId, visualSide)
 
   editor.markHistoryStoppingPoint('promote_mind_map_topic')

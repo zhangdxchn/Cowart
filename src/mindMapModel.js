@@ -125,6 +125,30 @@ export function getMindMapConnectionAnchors(structureId, side = 'right') {
   }
 }
 
+function isMindMapSidePreference(side) {
+  return side === 'left' || side === 'right'
+}
+
+export function resolveMindMapChildPlacement({
+  structureId,
+  parentIsRoot,
+  parentSide = null,
+  requestedSide = null
+}) {
+  const { direction } = getMindMapStructureDefinition(structureId)
+  const savedSide = parentIsRoot
+    ? direction === 'balanced'
+      ? requestedSide === 'left' ? 'left' : 'right'
+      : isMindMapSidePreference(requestedSide) ? requestedSide : 'auto'
+    : isMindMapSidePreference(parentSide) ? parentSide : 'auto'
+  return {
+    savedSide,
+    visualDirection: direction === 'balanced'
+      ? savedSide === 'left' ? 'left' : 'right'
+      : direction
+  }
+}
+
 export function getMindMapPresetNodeProps(presetId, depth, branchColor = 'blue') {
   const role = mindMapStyleRole(depth)
   const props = mindMapStylePreset(presetId)[role].node
@@ -141,13 +165,15 @@ export function getMindMapPresetEdgeProps(presetId, depth, branchColor = 'blue')
   }
 }
 
-export function createMindMapEdgeAtomically(editor, edgeShape, bindings) {
+export function createMindMapTopicAtomically(editor, nodeShape, edgeShape, bindings, rootUpdate = null) {
   editor.store.atomic(() => {
+    editor.createShape(nodeShape)
     editor.createShape(edgeShape)
     editor.createBindings(bindings)
     editor.updateShape({ id: edgeShape.id, type: edgeShape.type, isLocked: true })
+    if (rootUpdate) editor.updateShape(rootUpdate)
   })
-  return edgeShape.id
+  return nodeShape.id
 }
 
 export function isMindMapNode(shape) {

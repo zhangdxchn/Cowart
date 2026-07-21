@@ -13,10 +13,10 @@ import {
   computeMindMapLayout,
   createMindMapBindingUpdates,
   createMindMapDepthStyleUpdates,
-  createMindMapEdgeAtomically,
   createMindMapLayoutUpdates,
   createMindMapPresetUpdates,
   createMindMapStyleUpdates,
+  createMindMapTopicAtomically,
   createMindMapTranslationUpdates,
   getMindMapChildStyle,
   getMindMapConnectionAnchors,
@@ -26,12 +26,15 @@ import {
   getMindMapPresetNodeProps,
   getMindMapRootId,
   getMindMapStructureDefinition,
-  getMindMapStructureId
+  getMindMapStructureId,
+  resolveMindMapChildPlacement
 } from './mindMapModel.js'
 
-test('createMindMapEdgeAtomically publishes a connected edge in one store operation', () => {
+test('createMindMapTopicAtomically publishes a complete relation in one store operation', () => {
   const operations = []
   let atomicDepth = 0
+  const createdShapeIds = []
+  let bindingCount = 0
   const editor = {
     store: {
       atomic(operation) {
@@ -40,33 +43,47 @@ test('createMindMapEdgeAtomically publishes a connected edge in one store operat
         operation()
         atomicDepth -= 1
         operations.push('atomic:end')
+        assert.deepEqual(createdShapeIds, ['shape:child', 'shape:edge'])
+        assert.equal(bindingCount, 2)
         operations.push('operation:complete')
       }
     },
     createShape(shape) {
       assert.equal(atomicDepth, 1)
+      createdShapeIds.push(shape.id)
       operations.push(`shape:${shape.id}`)
     },
     createBindings(bindings) {
       assert.equal(atomicDepth, 1)
+      bindingCount += bindings.length
       operations.push(`bindings:${bindings.length}`)
     },
     updateShape(shape) {
       assert.equal(atomicDepth, 1)
-      operations.push(`lock:${shape.id}:${shape.isLocked}`)
+      operations.push(shape.id === 'shape:edge'
+        ? `lock:${shape.id}:${shape.isLocked}`
+        : `root:${shape.id}:${shape.meta.cowartMindMapAutoLayout}`)
     }
   }
+  const nodeShape = { id: 'shape:child', type: 'geo' }
   const edgeShape = { id: 'shape:edge', type: 'arrow' }
   const bindings = [{ type: 'arrow' }, { type: 'arrow' }]
+  const rootUpdate = {
+    id: 'shape:root',
+    type: 'geo',
+    meta: { cowartMindMapAutoLayout: true }
+  }
 
-  const edgeId = createMindMapEdgeAtomically(editor, edgeShape, bindings)
+  const nodeId = createMindMapTopicAtomically(editor, nodeShape, edgeShape, bindings, rootUpdate)
 
-  assert.equal(edgeId, edgeShape.id)
+  assert.equal(nodeId, nodeShape.id)
   assert.deepEqual(operations, [
     'atomic:start',
+    'shape:shape:child',
     'shape:shape:edge',
     'bindings:2',
     'lock:shape:edge:true',
+    'root:shape:root:true',
     'atomic:end',
     'operation:complete'
   ])
@@ -203,6 +220,28 @@ test('mind-map structures default old canvases to balanced and expose directiona
     start: { x: 0.5, y: 1 },
     end: { x: 0.5, y: 0 }
   })
+})
+
+test('resolveMindMapChildPlacement preserves sibling preferences independently from visual direction', () => {
+  assert.deepEqual(resolveMindMapChildPlacement({
+    structureId: 'balanced',
+    parentIsRoot: true,
+    requestedSide: 'left'
+  }), { savedSide: 'left', visualDirection: 'left' })
+  assert.deepEqual(resolveMindMapChildPlacement({
+    structureId: 'right',
+    parentIsRoot: true
+  }), { savedSide: 'auto', visualDirection: 'right' })
+  assert.deepEqual(resolveMindMapChildPlacement({
+    structureId: 'right',
+    parentIsRoot: true,
+    requestedSide: 'left'
+  }), { savedSide: 'left', visualDirection: 'right' })
+  assert.deepEqual(resolveMindMapChildPlacement({
+    structureId: 'org-down',
+    parentIsRoot: false,
+    parentSide: 'left'
+  }), { savedSide: 'left', visualDirection: 'down' })
 })
 
 test('collectMindMapStyleTargets resolves node, branch, and map scopes with incoming edges', () => {
