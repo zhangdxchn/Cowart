@@ -1,6 +1,108 @@
 export const MIND_MAP_NODE_META_KEY = 'cowartMindMapNode'
 export const MIND_MAP_EDGE_META_KEY = 'cowartMindMapEdge'
 export const MIND_MAP_VERSION = 1
+export const DEFAULT_MIND_MAP_STYLE_PRESET_ID = 'balanced'
+
+export const MIND_MAP_STYLE_PRESETS = Object.freeze({
+  balanced: Object.freeze({
+    label: '清爽',
+    root: Object.freeze({
+      node: Object.freeze({
+        geo: 'rectangle', color: 'blue', labelColor: 'white', fill: 'solid', dash: 'solid', size: 'l', font: 'sans'
+      })
+    }),
+    primary: Object.freeze({
+      node: Object.freeze({ geo: 'rectangle', labelColor: 'black', fill: 'semi', dash: 'solid', size: 'm', font: 'sans' }),
+      edge: Object.freeze({ kind: 'elbow', dash: 'solid', size: 'm' })
+    }),
+    descendant: Object.freeze({
+      node: Object.freeze({ geo: 'rectangle', labelColor: 'black', fill: 'none', dash: 'solid', size: 's', font: 'sans' }),
+      edge: Object.freeze({ kind: 'elbow', dash: 'solid', size: 's' })
+    })
+  }),
+  cards: Object.freeze({
+    label: '卡片',
+    root: Object.freeze({
+      node: Object.freeze({
+        geo: 'rectangle', color: 'blue', labelColor: 'white', fill: 'solid', dash: 'solid', size: 'l', font: 'sans'
+      })
+    }),
+    primary: Object.freeze({
+      node: Object.freeze({ geo: 'rectangle', fill: 'solid', dash: 'solid', size: 'm', font: 'sans' }),
+      edge: Object.freeze({ kind: 'elbow', dash: 'solid', size: 'm' })
+    }),
+    descendant: Object.freeze({
+      node: Object.freeze({ geo: 'rectangle', labelColor: 'black', fill: 'semi', dash: 'solid', size: 'm', font: 'sans' }),
+      edge: Object.freeze({ kind: 'elbow', dash: 'solid', size: 's' })
+    })
+  }),
+  sketch: Object.freeze({
+    label: '手绘',
+    root: Object.freeze({
+      node: Object.freeze({
+        geo: 'oval', color: 'blue', labelColor: 'black', fill: 'semi', dash: 'draw', size: 'l', font: 'draw'
+      })
+    }),
+    primary: Object.freeze({
+      node: Object.freeze({ geo: 'oval', labelColor: 'black', fill: 'none', dash: 'draw', size: 'm', font: 'draw' }),
+      edge: Object.freeze({ kind: 'elbow', dash: 'draw', size: 'm' })
+    }),
+    descendant: Object.freeze({
+      node: Object.freeze({ geo: 'oval', labelColor: 'black', fill: 'none', dash: 'draw', size: 's', font: 'draw' }),
+      edge: Object.freeze({ kind: 'elbow', dash: 'draw', size: 's' })
+    })
+  })
+})
+
+const MIND_MAP_NODE_DIMENSIONS = Object.freeze({
+  root: Object.freeze({ w: 220, h: 64 }),
+  primary: Object.freeze({ w: 176, h: 48 }),
+  descendant: Object.freeze({ w: 160, h: 44 })
+})
+
+const MIND_MAP_NODE_INHERITED_STYLE_KEYS = ['geo', 'fill', 'dash', 'size', 'font']
+const MIND_MAP_EDGE_INHERITED_STYLE_KEYS = ['kind', 'dash', 'size']
+const DARK_SOLID_LABEL_COLORS = new Set(['black', 'grey', 'violet', 'blue', 'green', 'red'])
+
+function mindMapStylePreset(presetId) {
+  return MIND_MAP_STYLE_PRESETS[presetId] ?? MIND_MAP_STYLE_PRESETS[DEFAULT_MIND_MAP_STYLE_PRESET_ID]
+}
+
+function mindMapStyleRole(depth) {
+  if (depth <= 0) return 'root'
+  return depth === 1 ? 'primary' : 'descendant'
+}
+
+export function getMindMapLabelColor(color, fill) {
+  return fill === 'solid' && DARK_SOLID_LABEL_COLORS.has(color) ? 'white' : 'black'
+}
+
+export function getMindMapNodeDimensions(depth, scale = 1) {
+  const resolvedScale = Number.isFinite(Number(scale)) && Number(scale) > 0 ? Number(scale) : 1
+  const dimensions = MIND_MAP_NODE_DIMENSIONS[mindMapStyleRole(depth)]
+  return { w: dimensions.w * resolvedScale, h: dimensions.h * resolvedScale }
+}
+
+export function getMindMapStylePresetId(root) {
+  const presetId = root?.meta?.cowartMindMapStylePreset
+  return MIND_MAP_STYLE_PRESETS[presetId] ? presetId : DEFAULT_MIND_MAP_STYLE_PRESET_ID
+}
+
+export function getMindMapPresetNodeProps(presetId, depth, branchColor = 'blue') {
+  const role = mindMapStyleRole(depth)
+  const props = mindMapStylePreset(presetId)[role].node
+  const color = role === 'root' ? props.color ?? 'blue' : branchColor
+  return { ...props, color, labelColor: props.labelColor ?? getMindMapLabelColor(color, props.fill) }
+}
+
+export function getMindMapPresetEdgeProps(presetId, depth, branchColor = 'blue') {
+  const role = depth <= 1 ? 'primary' : 'descendant'
+  return {
+    ...mindMapStylePreset(presetId)[role].edge,
+    color: branchColor,
+    labelColor: branchColor
+  }
+}
 
 export function createMindMapEdgeAtomically(editor, edgeShape, bindings) {
   editor.store.atomic(() => {
@@ -121,6 +223,274 @@ export function getMindMapDescendantIds(graph, nodeId) {
   return descendants
 }
 
+export function getMindMapNodeDepth(graph, nodeId) {
+  if (!graph.nodeById.has(nodeId)) return -1
+  let depth = 0
+  let currentId = nodeId
+  const visited = new Set()
+  while (graph.parentByChild.has(currentId) && !visited.has(currentId)) {
+    visited.add(currentId)
+    currentId = graph.parentByChild.get(currentId)
+    depth += 1
+  }
+  return depth
+}
+
+export function getMindMapRootId(graph, nodeId) {
+  if (!graph.nodeById.has(nodeId)) return null
+  let rootId = nodeId
+  const visited = new Set()
+  while (graph.parentByChild.has(rootId) && !visited.has(rootId)) {
+    visited.add(rootId)
+    rootId = graph.parentByChild.get(rootId)
+  }
+  return rootId
+}
+
+function mindMapBranchColor(graph, nodeId) {
+  const rootId = getMindMapRootId(graph, nodeId)
+  if (!rootId || nodeId === rootId) return 'blue'
+  let branchId = nodeId
+  while (graph.parentByChild.get(branchId) && graph.parentByChild.get(branchId) !== rootId) {
+    branchId = graph.parentByChild.get(branchId)
+  }
+  return graph.nodeById.get(branchId)?.props?.color ?? graph.nodeById.get(nodeId)?.props?.color ?? 'blue'
+}
+
+export function collectMindMapStyleTargets(graph, nodeId, scope = 'node') {
+  const rootId = getMindMapRootId(graph, nodeId)
+  if (!rootId) return { rootId: null, nodeIds: [], edgeIds: [] }
+
+  const nodeIds = scope === 'map'
+    ? [rootId, ...getMindMapDescendantIds(graph, rootId)]
+    : scope === 'branch'
+      ? [nodeId, ...getMindMapDescendantIds(graph, nodeId)]
+      : [nodeId]
+  const edgeIds = nodeIds.map((id) => graph.edgeByChild.get(id)).filter(Boolean)
+  return { rootId, nodeIds, edgeIds }
+}
+
+export function createMindMapStyleUpdates(
+  graph,
+  nodeId,
+  scope,
+  { nodeProps = {}, edgeProps = {} } = {}
+) {
+  const targets = collectMindMapStyleTargets(graph, nodeId, scope)
+  const updates = []
+  for (const id of targets.nodeIds) {
+    const node = graph.nodeById.get(id)
+    if (!node) continue
+    const props = typeof nodeProps === 'function' ? nodeProps(node) : nodeProps
+    if (props && Object.keys(props).length) updates.push({ id: node.id, type: node.type, props })
+  }
+  for (const id of targets.edgeIds) {
+    const edge = graph.edgeById.get(id)
+    if (!edge) continue
+    const props = typeof edgeProps === 'function' ? edgeProps(edge) : edgeProps
+    if (props && Object.keys(props).length) updates.push({ id: edge.id, type: edge.type, props })
+  }
+  return updates
+}
+
+function createResetBranchColorMap(graph, rootId, branchColors) {
+  const colorsByNode = new Map([[rootId, 'blue']])
+  if (!branchColors?.length) return colorsByNode
+  const sideCounts = { left: 0, right: 0 }
+  for (const branchId of graph.childrenByParent.get(rootId) ?? []) {
+    const side = graph.nodeById.get(branchId)?.meta?.cowartMindMapSide === 'left' ? 'left' : 'right'
+    const color = branchColors[sideCounts[side] % branchColors.length]
+    sideCounts[side] += 1
+    colorsByNode.set(branchId, color)
+    for (const descendantId of getMindMapDescendantIds(graph, branchId)) colorsByNode.set(descendantId, color)
+  }
+  return colorsByNode
+}
+
+export function createMindMapPresetUpdates(
+  graph,
+  rootId,
+  presetId,
+  { branchColors = null } = {}
+) {
+  const resolvedPresetId = MIND_MAP_STYLE_PRESETS[presetId]
+    ? presetId
+    : DEFAULT_MIND_MAP_STYLE_PRESET_ID
+  const targetIds = [rootId, ...getMindMapDescendantIds(graph, rootId)]
+  const resetColorsByNode = createResetBranchColorMap(graph, rootId, branchColors)
+  const updates = []
+
+  for (const nodeId of targetIds) {
+    const node = graph.nodeById.get(nodeId)
+    if (!node) continue
+    const depth = getMindMapNodeDepth(graph, nodeId)
+    const color = branchColors?.length
+      ? resetColorsByNode.get(nodeId) ?? 'blue'
+      : mindMapBranchColor(graph, nodeId)
+    updates.push({
+      id: node.id,
+      type: node.type,
+      props: getMindMapPresetNodeProps(resolvedPresetId, depth, color),
+      ...(nodeId === rootId
+        ? { meta: { ...node.meta, cowartMindMapStylePreset: resolvedPresetId } }
+        : {})
+    })
+
+    const edgeId = graph.edgeByChild.get(nodeId)
+    const edge = edgeId ? graph.edgeById.get(edgeId) : null
+    if (edge) {
+      updates.push({
+        id: edge.id,
+        type: edge.type,
+        props: getMindMapPresetEdgeProps(resolvedPresetId, depth, color)
+      })
+    }
+  }
+
+  return updates
+}
+
+function pickMindMapStyleProps(props, keys) {
+  return Object.fromEntries(keys.filter((key) => props?.[key] !== undefined).map((key) => [key, props[key]]))
+}
+
+function mindMapStyleOverrides(props, baseline, keys) {
+  return Object.fromEntries(
+    keys
+      .filter((key) => props?.[key] !== undefined && props[key] !== baseline?.[key])
+      .map((key) => [key, props[key]])
+  )
+}
+
+function rebaseMindMapStyleProps(props, fromBaseline, toBaseline, keys) {
+  return Object.fromEntries(
+    keys.map((key) => [
+      key,
+      props?.[key] === fromBaseline?.[key] ? toBaseline?.[key] : props?.[key]
+    ]).filter(([, value]) => value !== undefined)
+  )
+}
+
+function mindMapPropsChanged(props, nextProps) {
+  return Object.entries(nextProps).some(([key, value]) => props?.[key] !== value)
+}
+
+export function createMindMapDepthStyleUpdates(
+  graph,
+  nodeId,
+  { presetId = DEFAULT_MIND_MAP_STYLE_PRESET_ID, targetDepth } = {}
+) {
+  const node = graph.nodeById.get(nodeId)
+  const currentDepth = getMindMapNodeDepth(graph, nodeId)
+  if (!node || currentDepth < 0 || !Number.isInteger(targetDepth) || targetDepth < 0 || currentDepth === targetDepth) {
+    return []
+  }
+
+  const color = node.props?.color ?? mindMapBranchColor(graph, nodeId)
+  const currentNodeBaseline = getMindMapPresetNodeProps(presetId, currentDepth, color)
+  const targetNodeBaseline = getMindMapPresetNodeProps(presetId, targetDepth, color)
+  const nodeProps = rebaseMindMapStyleProps(
+    node.props,
+    currentNodeBaseline,
+    targetNodeBaseline,
+    MIND_MAP_NODE_INHERITED_STYLE_KEYS
+  )
+  if (
+    node.props?.fill === currentNodeBaseline.fill &&
+    node.props?.labelColor === currentNodeBaseline.labelColor
+  ) {
+    nodeProps.labelColor = targetNodeBaseline.labelColor
+  }
+  const scale = Number(node.props?.scale || 1)
+  const currentDimensions = getMindMapNodeDimensions(currentDepth, scale)
+  const targetDimensions = getMindMapNodeDimensions(targetDepth, scale)
+  if (
+    Math.abs(Number(node.props?.w) - currentDimensions.w) < 0.01 &&
+    Math.abs(Number(node.props?.h) - currentDimensions.h) < 0.01
+  ) {
+    nodeProps.w = targetDimensions.w
+    nodeProps.h = targetDimensions.h
+  }
+
+  const updates = []
+  if (mindMapPropsChanged(node.props, nodeProps)) {
+    updates.push({ id: node.id, type: node.type, props: nodeProps })
+  }
+
+  const edgeId = graph.edgeByChild.get(nodeId)
+  const edge = edgeId ? graph.edgeById.get(edgeId) : null
+  if (edge) {
+    const currentEdgeBaseline = getMindMapPresetEdgeProps(presetId, currentDepth, color)
+    const targetEdgeBaseline = getMindMapPresetEdgeProps(presetId, targetDepth, color)
+    const edgeProps = rebaseMindMapStyleProps(
+      edge.props,
+      currentEdgeBaseline,
+      targetEdgeBaseline,
+      MIND_MAP_EDGE_INHERITED_STYLE_KEYS
+    )
+    if (mindMapPropsChanged(edge.props, edgeProps)) {
+      updates.push({ id: edge.id, type: edge.type, props: edgeProps })
+    }
+  }
+
+  return updates
+}
+
+export function getMindMapChildStyle(
+  graph,
+  parentId,
+  {
+    side = 'right',
+    color = 'blue',
+    presetId = DEFAULT_MIND_MAP_STYLE_PRESET_ID,
+    preferredSiblingId = null
+  } = {}
+) {
+  const parent = graph.nodeById.get(parentId)
+  const depth = Math.max(1, getMindMapNodeDepth(graph, parentId) + 1)
+  const nodeBase = getMindMapPresetNodeProps(presetId, depth, color)
+  const edgeBase = getMindMapPresetEdgeProps(presetId, depth, color)
+  if (!parent) return { depth, nodeProps: nodeBase, edgeProps: edgeBase }
+
+  const sameSideSiblingIds = (graph.childrenByParent.get(parentId) ?? []).filter(
+    (childId) => graph.nodeById.get(childId)?.meta?.cowartMindMapSide === side
+  )
+  const siblingId = sameSideSiblingIds.includes(preferredSiblingId)
+    ? preferredSiblingId
+    : sameSideSiblingIds.at(-1)
+  const sibling = graph.nodeById.get(siblingId)
+  const siblingEdge = sibling ? graph.edgeById.get(graph.edgeByChild.get(sibling.id)) : null
+  let nodeOverrides = {}
+  let edgeOverrides = {}
+
+  if (sibling) {
+    nodeOverrides = pickMindMapStyleProps(sibling.props, MIND_MAP_NODE_INHERITED_STYLE_KEYS)
+    edgeOverrides = pickMindMapStyleProps(siblingEdge?.props, MIND_MAP_EDGE_INHERITED_STYLE_KEYS)
+  } else if (depth > 1) {
+    const parentDepth = depth - 1
+    const parentColor = mindMapBranchColor(graph, parent.id)
+    nodeOverrides = mindMapStyleOverrides(
+      parent.props,
+      getMindMapPresetNodeProps(presetId, parentDepth, parentColor),
+      MIND_MAP_NODE_INHERITED_STYLE_KEYS
+    )
+    const parentEdge = graph.edgeById.get(graph.edgeByChild.get(parent.id))
+    edgeOverrides = mindMapStyleOverrides(
+      parentEdge?.props,
+      getMindMapPresetEdgeProps(presetId, parentDepth, parentColor),
+      MIND_MAP_EDGE_INHERITED_STYLE_KEYS
+    )
+  }
+
+  const nodeProps = { ...nodeBase, ...nodeOverrides, color }
+  nodeProps.labelColor = getMindMapLabelColor(color, nodeProps.fill)
+  return {
+    depth,
+    nodeProps,
+    edgeProps: { ...edgeBase, ...edgeOverrides, color, labelColor: color }
+  }
+}
+
 export function collectMindMapBranchRecordIds(graph, nodeId) {
   const nodeIds = [nodeId, ...getMindMapDescendantIds(graph, nodeId)]
   const recordIds = new Set(nodeIds)
@@ -168,9 +538,7 @@ export function createMindMapTranslationUpdates(graph, initial, current, selecte
     })
   }
 
-  let rootId = initial.id
-  while (graph.parentByChild.has(rootId)) rootId = graph.parentByChild.get(rootId)
-  const root = graph.nodeById.get(rootId)
+  const root = graph.nodeById.get(getMindMapRootId(graph, initial.id))
   if (root) {
     updates.push({
       id: root.id,

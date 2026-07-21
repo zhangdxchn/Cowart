@@ -2,26 +2,42 @@ import {
   Box,
   GeoShapeUtil,
   TldrawUiContextualToolbar,
+  TldrawUiPopover,
+  TldrawUiPopoverContent,
+  TldrawUiPopoverTrigger,
   TldrawUiToolbarButton,
   createShapeId,
+  getColorValue,
   startEditingShapeWithRichText,
   toRichText,
   useEditor,
   useValue
 } from 'tldraw'
 import { generateKeyBetween } from 'fractional-indexing'
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 import {
+  DEFAULT_MIND_MAP_STYLE_PRESET_ID,
+  MIND_MAP_STYLE_PRESETS,
   MIND_MAP_VERSION,
   buildMindMapGraph,
   collectMindMapBranchRecordIds,
   collectMindMapCascadeShapeIds,
   computeMindMapLayout,
+  createMindMapDepthStyleUpdates,
   createMindMapEdgeAtomically,
   createMindMapLayoutUpdates,
+  createMindMapPresetUpdates,
+  createMindMapStyleUpdates,
   createMindMapTranslationUpdates,
+  getMindMapChildStyle,
   getMindMapDescendantIds,
+  getMindMapLabelColor,
+  getMindMapNodeDepth,
+  getMindMapNodeDimensions,
+  getMindMapPresetNodeProps,
+  getMindMapRootId,
+  getMindMapStylePresetId,
   isMindMapEdge,
   isMindMapNode
 } from './mindMapModel.js'
@@ -29,13 +45,43 @@ import {
 export const MIND_MAP_TOOL_ID = 'mind-map'
 export const MIND_MAP_TOOL_LABEL = '思维导图'
 
-const ROOT_NODE_W = 220
-const ROOT_NODE_H = 64
-const TOPIC_NODE_W = 176
-const TOPIC_NODE_H = 48
 const MIND_MAP_HORIZONTAL_GAP = 112
 const MIND_MAP_VERTICAL_GAP = 32
-const MIND_MAP_BRANCH_COLORS = ['orange', 'green', 'violet', 'red', 'yellow', 'blue']
+const MIND_MAP_BRANCH_COLORS = ['orange', 'green', 'violet', 'red', 'light-blue', 'blue']
+const MIND_MAP_COLOR_OPTIONS = ['black', 'grey', 'blue', 'light-blue', 'orange', 'green', 'light-green', 'violet', 'red', 'light-red']
+const MIND_MAP_FILL_OPTIONS = [
+  { value: 'none', label: '无填充' },
+  { value: 'semi', label: '浅填充' },
+  { value: 'solid', label: '实心' },
+  { value: 'pattern', label: '纹理' }
+]
+const MIND_MAP_DASH_OPTIONS = [
+  { value: 'solid', label: '实线' },
+  { value: 'dashed', label: '虚线' },
+  { value: 'dotted', label: '点线' },
+  { value: 'draw', label: '手绘' }
+]
+const MIND_MAP_SIZE_OPTIONS = [
+  { value: 's', label: '小' },
+  { value: 'm', label: '中' },
+  { value: 'l', label: '大' },
+  { value: 'xl', label: '特大' }
+]
+const MIND_MAP_FONT_OPTIONS = [
+  { value: 'sans', label: '无衬线' },
+  { value: 'draw', label: '手写' },
+  { value: 'serif', label: '衬线' },
+  { value: 'mono', label: '等宽' }
+]
+const MIND_MAP_GEO_OPTIONS = [
+  { value: 'rectangle', label: '矩形' },
+  { value: 'ellipse', label: '椭圆' },
+  { value: 'oval', label: '胶囊' }
+]
+const MIND_MAP_CONNECTOR_OPTIONS = [
+  { value: 'elbow', label: '折线' },
+  { value: 'arc', label: '直线' }
+]
 
 export const mindMapToolIcon = (
   <svg aria-hidden="true" className="cowart-mind-map-tool-icon" viewBox="0 0 24 24">
@@ -55,21 +101,11 @@ function editorMindMapGraph(editor) {
   })
 }
 
-function mindMapRootId(graph, nodeId) {
-  let rootId = nodeId
-  const visited = new Set()
-  while (graph.parentByChild.has(rootId) && !visited.has(rootId)) {
-    visited.add(rootId)
-    rootId = graph.parentByChild.get(rootId)
-  }
-  return rootId
-}
-
 function nodeScale(editor) {
   return editor.getResizeScaleFactor()
 }
 
-function mindMapNodeMeta({ order, side = 'center', autoLayout, collapsed = false }) {
+function mindMapNodeMeta({ order, side = 'center', autoLayout, collapsed = false, stylePreset = null }) {
   return {
     cowartMindMapNode: true,
     cowartMindMapVersion: MIND_MAP_VERSION,
@@ -77,6 +113,7 @@ function mindMapNodeMeta({ order, side = 'center', autoLayout, collapsed = false
     cowartMindMapSide: side,
     cowartMindMapCollapsed: collapsed,
     cowartMindMapHidden: false,
+    ...(stylePreset ? { cowartMindMapStylePreset: stylePreset } : {}),
     ...(typeof autoLayout === 'boolean' ? { cowartMindMapAutoLayout: autoLayout } : {})
   }
 }
@@ -122,10 +159,10 @@ function startEditingMindMapNode(editor, nodeId) {
 
 function createMindMapRoot(editor) {
   const scale = nodeScale(editor)
-  const width = ROOT_NODE_W * scale
-  const height = ROOT_NODE_H * scale
+  const { w: width, h: height } = getMindMapNodeDimensions(0, scale)
   const center = editor.getViewportPageBounds().center
   const nodeId = createShapeId()
+  const nodeStyle = getMindMapPresetNodeProps(DEFAULT_MIND_MAP_STYLE_PRESET_ID, 0, 'blue')
 
   editor.markHistoryStoppingPoint('create_mind_map')
   editor.createShape({
@@ -136,16 +173,13 @@ function createMindMapRoot(editor) {
     meta: mindMapNodeMeta({
       order: generateKeyBetween(null, null),
       side: 'center',
-      autoLayout: true
+      autoLayout: true,
+      stylePreset: DEFAULT_MIND_MAP_STYLE_PRESET_ID
     }),
     props: {
       w: width,
       h: height,
-      geo: 'rectangle',
-      color: 'blue',
-      fill: 'solid',
-      dash: 'solid',
-      font: 'sans',
+      ...nodeStyle,
       align: 'middle',
       verticalAlign: 'middle',
       richText: toRichText('中心主题'),
@@ -166,7 +200,7 @@ function arrowBindingProps(terminal, normalizedAnchor) {
   }
 }
 
-function createMindMapEdge(editor, parent, child, side, color, scale) {
+function createMindMapEdge(editor, parent, child, side, edgeStyle, scale) {
   const edgeId = createShapeId()
   const parentCenter = {
     x: Number(parent.x) + Number(parent.props?.w || 0) / 2,
@@ -188,12 +222,8 @@ function createMindMapEdge(editor, parent, child, side, color, scale) {
       cowartMindMapHidden: false
     },
     props: {
-      kind: 'elbow',
-      dash: 'solid',
-      size: 's',
+      ...edgeStyle,
       fill: 'none',
-      color,
-      labelColor: color,
       start: { x: 0, y: 0 },
       end: { x: childCenter.x - parentCenter.x, y: childCenter.y - parentCenter.y },
       arrowheadStart: 'none',
@@ -222,15 +252,21 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
   const parent = graph.nodeById.get(parentId)
   if (!parent) return null
 
-  const rootId = mindMapRootId(graph, parentId)
+  const rootId = getMindMapRootId(graph, parentId)
   const root = graph.nodeById.get(rootId)
   const resolvedSide = graph.parentByChild.has(parentId)
     ? parent.meta?.cowartMindMapSide === 'left' ? 'left' : 'right'
     : side === 'left' ? 'left' : 'right'
   const color = branchColor(graph, parentId, resolvedSide)
   const scale = Number(root?.props?.scale || parent.props?.scale || 1)
-  const width = TOPIC_NODE_W * scale
-  const height = TOPIC_NODE_H * scale
+  const presetId = getMindMapStylePresetId(root)
+  const childStyle = getMindMapChildStyle(graph, parentId, {
+    side: resolvedSide,
+    color,
+    presetId,
+    preferredSiblingId: afterChildId
+  })
+  const { w: width, h: height } = getMindMapNodeDimensions(childStyle.depth, scale)
   const siblingCount = (graph.childrenByParent.get(parentId) ?? []).length
   const provisionalX = resolvedSide === 'left'
     ? Number(parent.x) - width - MIND_MAP_HORIZONTAL_GAP * scale
@@ -252,11 +288,7 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
       props: {
         w: width,
         h: height,
-        geo: 'rectangle',
-        color,
-        fill: 'semi',
-        dash: 'solid',
-        font: 'sans',
+        ...childStyle.nodeProps,
         align: 'middle',
         verticalAlign: 'middle',
         richText: toRichText(label),
@@ -264,7 +296,7 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
       }
     })
     const child = editor.getShape(nodeId)
-    if (child) createMindMapEdge(editor, parent, child, resolvedSide, color, scale)
+    if (child) createMindMapEdge(editor, parent, child, resolvedSide, childStyle.edgeProps, scale)
     if (root?.meta?.cowartMindMapAutoLayout !== false) {
       editor.updateShape({
         id: root.id,
@@ -302,7 +334,16 @@ function promoteMindMapNode(editor, nodeId) {
   const relation = edgeId ? graph.relationByEdge.get(edgeId) : null
   if (!node || !parent || !grandparent || !relation) return false
 
-  const side = grandparentId === mindMapRootId(graph, grandparentId)
+  const rootId = getMindMapRootId(graph, nodeId)
+  const root = graph.nodeById.get(rootId)
+  const presetId = getMindMapStylePresetId(root)
+  const currentDepth = getMindMapNodeDepth(graph, nodeId)
+  const targetDepth = currentDepth - 1
+  const depthStyleUpdates = createMindMapDepthStyleUpdates(graph, nodeId, { presetId, targetDepth })
+  const nodeStyleUpdate = depthStyleUpdates.find((update) => update.id === node.id)
+  const edgeStyleUpdates = depthStyleUpdates.filter((update) => update.id !== node.id)
+  const promotedNodeProps = { ...nodeStyleUpdate?.props }
+  const side = grandparentId === getMindMapRootId(graph, grandparentId)
     ? node.meta?.cowartMindMapSide === 'left' ? 'left' : 'right'
     : grandparent.meta?.cowartMindMapSide === 'left' ? 'left' : 'right'
 
@@ -318,13 +359,15 @@ function promoteMindMapNode(editor, nodeId) {
     editor.updateShape({
       id: node.id,
       type: node.type,
+      ...(Object.keys(promotedNodeProps).length ? { props: promotedNodeProps } : {}),
       meta: {
         ...node.meta,
         cowartMindMapSide: side,
         cowartMindMapOrder: nextChildOrder(graph, grandparentId)
       }
     })
-  })
+    if (edgeStyleUpdates.length) editor.updateShapes(edgeStyleUpdates)
+  }, { ignoreShapeLock: true })
   editor.select(nodeId)
   return true
 }
@@ -345,7 +388,7 @@ function toggleMindMapCollapse(editor, nodeId) {
 
 function requestMindMapLayout(editor, nodeId) {
   const graph = editorMindMapGraph(editor)
-  const root = graph.nodeById.get(mindMapRootId(graph, nodeId))
+  const root = graph.nodeById.get(getMindMapRootId(graph, nodeId))
   if (!root) return
   editor.markHistoryStoppingPoint('layout_mind_map')
   editor.updateShape({
@@ -557,6 +600,236 @@ function CowartMindMapKeyboardShortcuts() {
   return null
 }
 
+function applyMindMapStyle(editor, nodeId, scope, style) {
+  const graph = editorMindMapGraph(editor)
+  const updates = createMindMapStyleUpdates(graph, nodeId, scope, style)
+  if (!updates.length) return
+  editor.markHistoryStoppingPoint('change_mind_map_style')
+  editor.run(() => editor.updateShapes(updates), { ignoreShapeLock: true })
+}
+
+function applyMindMapNodeStyle(editor, nodeId, scope, property, value) {
+  if (property === 'color') {
+    applyMindMapStyle(editor, nodeId, scope, {
+      nodeProps: (node) => ({
+        color: value,
+        labelColor: getMindMapLabelColor(value, node.props?.fill)
+      }),
+      edgeProps: { color: value, labelColor: value }
+    })
+    return
+  }
+  if (property === 'fill') {
+    applyMindMapStyle(editor, nodeId, scope, {
+      nodeProps: (node) => ({
+        fill: value,
+        labelColor: getMindMapLabelColor(node.props?.color, value)
+      })
+    })
+    return
+  }
+  applyMindMapStyle(editor, nodeId, scope, { nodeProps: { [property]: value } })
+}
+
+function applyMindMapEdgeStyle(editor, nodeId, scope, property, value) {
+  const edgeProps = property === 'kind'
+    ? { kind: value, ...(value === 'arc' ? { bend: 0 } : { elbowMidPoint: 0.5 }) }
+    : { [property]: value }
+  applyMindMapStyle(editor, nodeId, scope, { edgeProps })
+}
+
+function applyMindMapPreset(editor, rootId, presetId, { resetColors = false } = {}) {
+  const graph = editorMindMapGraph(editor)
+  const updates = createMindMapPresetUpdates(graph, rootId, presetId, {
+    branchColors: resetColors ? MIND_MAP_BRANCH_COLORS : null
+  })
+  if (!updates.length) return
+  editor.markHistoryStoppingPoint('change_mind_map_theme')
+  editor.run(() => editor.updateShapes(updates), { ignoreShapeLock: true })
+}
+
+function MindMapStyleChoiceGroup({ disabled = false, label, options, value, onChange, testId }) {
+  return (
+    <section className="cowart-mind-map-style-section" data-disabled={disabled || undefined}>
+      <div className="cowart-mind-map-style-heading">{label}</div>
+      <div className="cowart-mind-map-style-options">
+        {options.map((option) => (
+          <button
+            aria-pressed={value === option.value}
+            className="cowart-mind-map-style-option"
+            data-testid={`${testId}.${option.value}`}
+            disabled={disabled}
+            key={option.value}
+            onClick={() => onChange(option.value)}
+            title={option.label}
+            type="button"
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function MindMapStylePopover({ selected }) {
+  const editor = useEditor()
+  const [scope, setScope] = useState('node')
+  const themeColors = useValue(
+    'cowart mind map style colors',
+    () => editor.getCurrentTheme().colors[editor.getColorMode()],
+    [editor]
+  )
+  const nodeProps = selected.node.props ?? {}
+  const edgeProps = selected.incomingEdge?.props ?? {}
+  const canStyleEdges = !selected.isRoot || scope !== 'node'
+  const scopeOptions = [
+    { value: 'node', label: '当前节点' },
+    { value: 'branch', label: '当前分支' },
+    { value: 'map', label: '整张导图' }
+  ]
+
+  return (
+    <TldrawUiPopover id={`mind-map-style-${selected.node.id}`}>
+      <TldrawUiPopoverTrigger>
+        <TldrawUiToolbarButton
+          aria-label="样式"
+          className="cowart-mind-map-toolbar-button"
+          data-testid="mind-map.styles"
+          title="样式"
+          type="icon"
+        >
+          <span aria-hidden="true" className="cowart-mind-map-toolbar-icon">◐</span>
+          <span className="cowart-mind-map-toolbar-label">样式</span>
+        </TldrawUiToolbarButton>
+      </TldrawUiPopoverTrigger>
+      <TldrawUiPopoverContent align="center" collisionPadding={12} side="top">
+        <div
+          className="cowart-mind-map-style-panel"
+          data-testid="mind-map.style-panel"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <div className="cowart-mind-map-style-title">思维导图样式</div>
+          <MindMapStyleChoiceGroup
+            label="作用范围"
+            onChange={setScope}
+            options={scopeOptions}
+            testId="mind-map.style-scope"
+            value={scope}
+          />
+          <section className="cowart-mind-map-style-section">
+            <div className="cowart-mind-map-style-heading">整图主题</div>
+            <div className="cowart-mind-map-style-options">
+              {Object.entries(MIND_MAP_STYLE_PRESETS).map(([presetId, preset]) => (
+                <button
+                  aria-pressed={selected.presetId === presetId}
+                  className="cowart-mind-map-style-option cowart-mind-map-style-preset"
+                  data-testid={`mind-map.style-preset.${presetId}`}
+                  key={presetId}
+                  onClick={() => applyMindMapPreset(editor, selected.root.id, presetId)}
+                  type="button"
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          </section>
+          <section className="cowart-mind-map-style-section">
+            <div className="cowart-mind-map-style-heading">颜色</div>
+            <div className="cowart-mind-map-color-options">
+              {MIND_MAP_COLOR_OPTIONS.map((color) => (
+                <button
+                  aria-label={color}
+                  aria-pressed={nodeProps.color === color}
+                  className="cowart-mind-map-color-option"
+                  data-testid={`mind-map.style-color.${color}`}
+                  key={color}
+                  onClick={() => applyMindMapNodeStyle(editor, selected.node.id, scope, 'color', color)}
+                  style={{ '--cowart-mind-map-swatch': getColorValue(themeColors, color, 'solid') }}
+                  title={color}
+                  type="button"
+                />
+              ))}
+            </div>
+          </section>
+          <MindMapStyleChoiceGroup
+            label="填充"
+            onChange={(value) => applyMindMapNodeStyle(editor, selected.node.id, scope, 'fill', value)}
+            options={MIND_MAP_FILL_OPTIONS}
+            testId="mind-map.style-fill"
+            value={nodeProps.fill}
+          />
+          <MindMapStyleChoiceGroup
+            label="节点形状"
+            onChange={(value) => applyMindMapNodeStyle(editor, selected.node.id, scope, 'geo', value)}
+            options={MIND_MAP_GEO_OPTIONS}
+            testId="mind-map.style-geo"
+            value={nodeProps.geo}
+          />
+          <MindMapStyleChoiceGroup
+            label="字体"
+            onChange={(value) => applyMindMapNodeStyle(editor, selected.node.id, scope, 'font', value)}
+            options={MIND_MAP_FONT_OPTIONS}
+            testId="mind-map.style-font"
+            value={nodeProps.font}
+          />
+          <MindMapStyleChoiceGroup
+            label="节点粗细"
+            onChange={(value) => applyMindMapNodeStyle(editor, selected.node.id, scope, 'size', value)}
+            options={MIND_MAP_SIZE_OPTIONS}
+            testId="mind-map.style-size"
+            value={nodeProps.size}
+          />
+          <MindMapStyleChoiceGroup
+            label="节点轮廓"
+            onChange={(value) => applyMindMapNodeStyle(editor, selected.node.id, scope, 'dash', value)}
+            options={MIND_MAP_DASH_OPTIONS}
+            testId="mind-map.style-node-dash"
+            value={nodeProps.dash}
+          />
+          <MindMapStyleChoiceGroup
+            disabled={!canStyleEdges}
+            label="连接线"
+            onChange={(value) => applyMindMapEdgeStyle(editor, selected.node.id, scope, 'kind', value)}
+            options={MIND_MAP_CONNECTOR_OPTIONS}
+            testId="mind-map.style-edge-kind"
+            value={edgeProps.kind}
+          />
+          <MindMapStyleChoiceGroup
+            disabled={!canStyleEdges}
+            label="连接线粗细"
+            onChange={(value) => applyMindMapEdgeStyle(editor, selected.node.id, scope, 'size', value)}
+            options={MIND_MAP_SIZE_OPTIONS}
+            testId="mind-map.style-edge-size"
+            value={edgeProps.size}
+          />
+          <MindMapStyleChoiceGroup
+            disabled={!canStyleEdges}
+            label="连接线样式"
+            onChange={(value) => applyMindMapEdgeStyle(editor, selected.node.id, scope, 'dash', value)}
+            options={MIND_MAP_DASH_OPTIONS}
+            testId="mind-map.style-edge-dash"
+            value={edgeProps.dash}
+          />
+          <button
+            className="cowart-mind-map-style-reset"
+            data-testid="mind-map.style-reset"
+            onClick={() => applyMindMapPreset(
+              editor,
+              selected.root.id,
+              DEFAULT_MIND_MAP_STYLE_PRESET_ID,
+              { resetColors: true }
+            )}
+            type="button"
+          >
+            恢复默认样式
+          </button>
+        </div>
+      </TldrawUiPopoverContent>
+    </TldrawUiPopover>
+  )
+}
+
 function MindMapToolbarButton({ icon, label, onClick }) {
   return (
     <TldrawUiToolbarButton
@@ -582,8 +855,13 @@ function CowartMindMapToolbar() {
       const graph = editorMindMapGraph(editor)
       const parentId = graph.parentByChild.get(node.id) ?? null
       const grandparentId = parentId ? graph.parentByChild.get(parentId) ?? null : null
+      const root = graph.nodeById.get(getMindMapRootId(graph, node.id))
+      const incomingEdgeId = graph.edgeByChild.get(node.id)
       return {
         node,
+        root,
+        incomingEdge: incomingEdgeId ? graph.edgeById.get(incomingEdgeId) : null,
+        presetId: getMindMapStylePresetId(root),
         isRoot: !parentId,
         canPromote: Boolean(grandparentId),
         hasChildren: (graph.childrenByParent.get(node.id) ?? []).length > 0,
@@ -606,6 +884,7 @@ function CowartMindMapToolbar() {
       getSelectionBounds={getSelectionBounds}
       label="思维导图工具栏"
     >
+      <MindMapStylePopover selected={selected} />
       {selected.isRoot ? (
         <>
           <MindMapToolbarButton

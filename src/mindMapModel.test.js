@@ -2,14 +2,25 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  DEFAULT_MIND_MAP_STYLE_PRESET_ID,
+  MIND_MAP_STYLE_PRESETS,
   buildMindMapGraph,
   collectMindMapBranchRecordIds,
   collectMindMapCascadeShapeIds,
+  collectMindMapStyleTargets,
   computeMindMapLayout,
+  createMindMapDepthStyleUpdates,
   createMindMapEdgeAtomically,
   createMindMapLayoutUpdates,
+  createMindMapPresetUpdates,
+  createMindMapStyleUpdates,
   createMindMapTranslationUpdates,
-  getMindMapDescendantIds
+  getMindMapChildStyle,
+  getMindMapDescendantIds,
+  getMindMapNodeDimensions,
+  getMindMapPresetEdgeProps,
+  getMindMapPresetNodeProps,
+  getMindMapRootId
 } from './mindMapModel.js'
 
 test('createMindMapEdgeAtomically publishes a connected edge in one store operation', () => {
@@ -55,14 +66,28 @@ test('createMindMapEdgeAtomically publishes a connected edge in one store operat
   ])
 })
 
-function node(id, { x = 0, y = 0, w = 160, h = 48, order = 'a0', side = null, collapsed = false } = {}) {
+function node(id, {
+  x = 0,
+  y = 0,
+  w = 160,
+  h = 48,
+  order = 'a0',
+  side = null,
+  collapsed = false,
+  color = 'blue',
+  fill = 'semi',
+  dash = 'solid',
+  size = 'm',
+  font = 'sans',
+  geo = 'rectangle'
+} = {}) {
   return {
     id,
     typeName: 'shape',
     type: 'geo',
     x,
     y,
-    props: { w, h, growY: 0 },
+    props: { w, h, growY: 0, color, fill, dash, size, font, geo, labelColor: 'black' },
     meta: {
       cowartMindMapNode: true,
       cowartMindMapVersion: 1,
@@ -73,12 +98,13 @@ function node(id, { x = 0, y = 0, w = 160, h = 48, order = 'a0', side = null, co
   }
 }
 
-function edge(id, parentId, childId) {
+function edge(id, parentId, childId, { color = 'blue', dash = 'solid', size = 's', kind = 'elbow' } = {}) {
   const edgeShape = {
     id,
     typeName: 'shape',
     type: 'arrow',
-    meta: { cowartMindMapEdge: true, cowartMindMapVersion: 1 }
+    meta: { cowartMindMapEdge: true, cowartMindMapVersion: 1 },
+    props: { color, labelColor: color, dash, size, kind }
   }
   const start = {
     id: `binding:${id}:start`,
@@ -100,18 +126,18 @@ function edge(id, parentId, childId) {
 }
 
 function graphFixture() {
-  const root = node('shape:root', { x: 400, y: 300, w: 220, h: 64, side: 'center' })
-  const left = node('shape:left', { order: 'a1', side: 'left', h: 56 })
-  const right = node('shape:right', { order: 'a2', side: 'right', h: 72 })
-  const leftChildA = node('shape:left-a', { order: 'a1', side: 'left', h: 40 })
-  const leftChildB = node('shape:left-b', { order: 'a2', side: 'left', h: 80 })
-  const rightChild = node('shape:right-a', { order: 'a1', side: 'right', h: 44 })
+  const root = node('shape:root', { x: 400, y: 300, w: 220, h: 64, side: 'center', fill: 'solid', size: 'l' })
+  const left = node('shape:left', { order: 'a1', side: 'left', h: 56, color: 'green' })
+  const right = node('shape:right', { order: 'a2', side: 'right', h: 72, color: 'violet' })
+  const leftChildA = node('shape:left-a', { order: 'a1', side: 'left', h: 40, color: 'green', fill: 'none', size: 's' })
+  const leftChildB = node('shape:left-b', { order: 'a2', side: 'left', h: 80, color: 'green', fill: 'none', size: 's' })
+  const rightChild = node('shape:right-a', { order: 'a1', side: 'right', h: 44, color: 'violet', fill: 'none', size: 's' })
   const connections = [
-    edge('shape:edge-left', root.id, left.id),
-    edge('shape:edge-right', root.id, right.id),
-    edge('shape:edge-left-a', left.id, leftChildA.id),
-    edge('shape:edge-left-b', left.id, leftChildB.id),
-    edge('shape:edge-right-a', right.id, rightChild.id)
+    edge('shape:edge-left', root.id, left.id, { color: 'green' }),
+    edge('shape:edge-right', root.id, right.id, { color: 'violet' }),
+    edge('shape:edge-left-a', left.id, leftChildA.id, { color: 'green' }),
+    edge('shape:edge-left-b', left.id, leftChildB.id, { color: 'green' }),
+    edge('shape:edge-right-a', right.id, rightChild.id, { color: 'violet' })
   ]
 
   return {
@@ -119,6 +145,176 @@ function graphFixture() {
     bindings: connections.flatMap((item) => item.bindings)
   }
 }
+
+test('mind-map presets expose a stronger default hierarchy', () => {
+  assert.equal(DEFAULT_MIND_MAP_STYLE_PRESET_ID, 'balanced')
+  assert.deepEqual(Object.keys(MIND_MAP_STYLE_PRESETS), ['balanced', 'cards', 'sketch'])
+  assert.deepEqual(getMindMapPresetNodeProps('balanced', 0, 'orange'), {
+    geo: 'rectangle',
+    color: 'blue',
+    labelColor: 'white',
+    fill: 'solid',
+    dash: 'solid',
+    size: 'l',
+    font: 'sans'
+  })
+  assert.equal(getMindMapPresetNodeProps('balanced', 1, 'orange').fill, 'semi')
+  assert.equal(getMindMapPresetNodeProps('balanced', 1, 'orange').size, 'm')
+  assert.equal(getMindMapPresetNodeProps('balanced', 2, 'orange').fill, 'none')
+  assert.equal(getMindMapPresetNodeProps('balanced', 2, 'orange').size, 's')
+  assert.equal(getMindMapPresetEdgeProps('balanced', 1, 'orange').size, 'm')
+  assert.equal(getMindMapPresetEdgeProps('balanced', 2, 'orange').size, 's')
+  assert.equal(getMindMapPresetNodeProps('cards', 1, 'orange').labelColor, 'black')
+  assert.equal(getMindMapPresetNodeProps('cards', 1, 'blue').labelColor, 'white')
+})
+
+test('collectMindMapStyleTargets resolves node, branch, and map scopes with incoming edges', () => {
+  const graph = buildMindMapGraph(graphFixture())
+
+  assert.equal(getMindMapRootId(graph, 'shape:left-a'), 'shape:root')
+  assert.equal(getMindMapRootId(graph, 'shape:missing'), null)
+  assert.deepEqual(collectMindMapStyleTargets(graph, 'shape:left', 'node'), {
+    rootId: 'shape:root',
+    nodeIds: ['shape:left'],
+    edgeIds: ['shape:edge-left']
+  })
+  assert.deepEqual(collectMindMapStyleTargets(graph, 'shape:left', 'branch'), {
+    rootId: 'shape:root',
+    nodeIds: ['shape:left', 'shape:left-a', 'shape:left-b'],
+    edgeIds: ['shape:edge-left', 'shape:edge-left-a', 'shape:edge-left-b']
+  })
+  assert.deepEqual(collectMindMapStyleTargets(graph, 'shape:left', 'map'), {
+    rootId: 'shape:root',
+    nodeIds: ['shape:root', 'shape:left', 'shape:left-a', 'shape:left-b', 'shape:right', 'shape:right-a'],
+    edgeIds: [
+      'shape:edge-left',
+      'shape:edge-left-a',
+      'shape:edge-left-b',
+      'shape:edge-right',
+      'shape:edge-right-a'
+    ]
+  })
+})
+
+test('createMindMapStyleUpdates changes only the requested branch and its connectors', () => {
+  const graph = buildMindMapGraph(graphFixture())
+  const updates = createMindMapStyleUpdates(graph, 'shape:left', 'branch', {
+    nodeProps: { color: 'red', fill: 'solid', labelColor: 'white' },
+    edgeProps: { color: 'red', labelColor: 'red', dash: 'dashed' }
+  })
+  const byId = new Map(updates.map((update) => [update.id, update]))
+
+  assert.equal(byId.get('shape:left').props.color, 'red')
+  assert.equal(byId.get('shape:left-a').props.fill, 'solid')
+  assert.equal(byId.get('shape:edge-left').props.dash, 'dashed')
+  assert.equal(byId.get('shape:edge-left-b').props.color, 'red')
+  assert.equal(byId.has('shape:root'), false)
+  assert.equal(byId.has('shape:right'), false)
+  assert.equal(byId.has('shape:edge-right'), false)
+})
+
+test('createMindMapPresetUpdates preserves branch colors and records the chosen theme', () => {
+  const graph = buildMindMapGraph(graphFixture())
+  const updates = createMindMapPresetUpdates(graph, 'shape:root', 'sketch')
+  const byId = new Map(updates.map((update) => [update.id, update]))
+
+  assert.equal(byId.get('shape:root').meta.cowartMindMapStylePreset, 'sketch')
+  assert.equal(byId.get('shape:root').props.font, 'draw')
+  assert.equal(byId.get('shape:left').props.color, 'green')
+  assert.equal(byId.get('shape:left-a').props.color, 'green')
+  assert.equal(byId.get('shape:right-a').props.color, 'violet')
+  assert.equal(byId.get('shape:edge-left').props.color, 'green')
+  assert.equal(byId.get('shape:edge-right-a').props.color, 'violet')
+  assert.equal(byId.get('shape:edge-right-a').props.dash, 'draw')
+})
+
+test('createMindMapPresetUpdates can restore the default branch palette', () => {
+  const graph = buildMindMapGraph(graphFixture())
+  const updates = createMindMapPresetUpdates(graph, 'shape:root', 'balanced', {
+    branchColors: ['orange', 'green', 'violet']
+  })
+  const byId = new Map(updates.map((update) => [update.id, update]))
+
+  assert.equal(byId.get('shape:left').props.color, 'orange')
+  assert.equal(byId.get('shape:left-a').props.color, 'orange')
+  assert.equal(byId.get('shape:right').props.color, 'orange')
+  assert.equal(byId.get('shape:edge-left-b').props.color, 'orange')
+  assert.equal(byId.get('shape:edge-right-a').props.color, 'orange')
+})
+
+test('getMindMapChildStyle keeps hierarchy defaults and inherits explicit branch overrides', () => {
+  const fixture = graphFixture()
+  const graph = buildMindMapGraph(fixture)
+  const defaultChild = getMindMapChildStyle(graph, 'shape:left-a', {
+    side: 'left',
+    color: 'green',
+    presetId: 'balanced'
+  })
+
+  assert.equal(defaultChild.depth, 3)
+  assert.equal(defaultChild.nodeProps.fill, 'none')
+  assert.equal(defaultChild.nodeProps.size, 's')
+
+  graph.nodeById.get('shape:left-a').props.font = 'serif'
+  graph.nodeById.get('shape:left-a').props.geo = 'oval'
+  const customizedChild = getMindMapChildStyle(graph, 'shape:left-a', {
+    side: 'left',
+    color: 'green',
+    presetId: 'balanced'
+  })
+
+  assert.equal(customizedChild.nodeProps.font, 'serif')
+  assert.equal(customizedChild.nodeProps.geo, 'oval')
+  assert.equal(customizedChild.nodeProps.fill, 'none')
+
+  graph.nodeById.get('shape:left-b').props.font = 'mono'
+  graph.edgeById.get('shape:edge-left-a').props.dash = 'dashed'
+  graph.edgeById.get('shape:edge-left-b').props.dash = 'draw'
+  const insertedSibling = getMindMapChildStyle(graph, 'shape:left', {
+    side: 'left',
+    color: 'green',
+    presetId: 'balanced',
+    preferredSiblingId: 'shape:left-a'
+  })
+
+  assert.equal(insertedSibling.nodeProps.font, 'serif')
+  assert.equal(insertedSibling.edgeProps.dash, 'dashed')
+})
+
+test('createMindMapDepthStyleUpdates rebases defaults and preserves explicit overrides', () => {
+  const graph = buildMindMapGraph(graphFixture())
+  Object.assign(graph.nodeById.get('shape:left-a').props, getMindMapNodeDimensions(2))
+  const defaultUpdates = createMindMapDepthStyleUpdates(graph, 'shape:left-a', {
+    presetId: 'balanced',
+    targetDepth: 1
+  })
+  const defaultById = new Map(defaultUpdates.map((update) => [update.id, update]))
+
+  assert.equal(defaultById.get('shape:left-a').props.fill, 'semi')
+  assert.equal(defaultById.get('shape:left-a').props.size, 'm')
+  assert.equal(defaultById.get('shape:left-a').props.w, 176)
+  assert.equal(defaultById.get('shape:left-a').props.h, 48)
+  assert.equal(defaultById.get('shape:edge-left-a').props.size, 'm')
+
+  graph.nodeById.get('shape:left-a').props.font = 'serif'
+  graph.nodeById.get('shape:left-a').props.fill = 'solid'
+  graph.nodeById.get('shape:left-a').props.labelColor = 'white'
+  graph.nodeById.get('shape:left-a').props.w = 171
+  graph.nodeById.get('shape:left-a').props.h = 45
+  graph.edgeById.get('shape:edge-left-a').props.dash = 'dashed'
+  const customizedUpdates = createMindMapDepthStyleUpdates(graph, 'shape:left-a', {
+    presetId: 'balanced',
+    targetDepth: 1
+  })
+  const customizedById = new Map(customizedUpdates.map((update) => [update.id, update]))
+
+  assert.equal(customizedById.get('shape:left-a').props.font, 'serif')
+  assert.equal(customizedById.get('shape:left-a').props.fill, 'solid')
+  assert.equal(customizedById.get('shape:left-a').props.labelColor, undefined)
+  assert.equal(customizedById.get('shape:left-a').props.w, undefined)
+  assert.equal(customizedById.get('shape:left-a').props.h, undefined)
+  assert.equal(customizedById.get('shape:edge-left-a').props.dash, 'dashed')
+})
 
 test('buildMindMapGraph derives a sorted tree from standard arrow bindings', () => {
   const fixture = graphFixture()

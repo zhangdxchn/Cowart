@@ -188,8 +188,8 @@ body {
 
 .cowart-mind-map-toolbar-button {
   width: auto;
-  min-width: 62px;
-  padding: 0 9px;
+  min-width: 54px;
+  padding: 0 7px;
   gap: 4px;
 }
 
@@ -208,6 +208,114 @@ body {
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
+}
+
+.cowart-mind-map-style-panel {
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(520px, calc(var(--radix-popover-content-available-height, 520px) - 8px));
+  padding: 12px;
+  overflow: auto;
+  color: var(--tl-color-text-1);
+  background: var(--tl-color-panel);
+}
+
+.cowart-mind-map-style-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cowart-mind-map-style-section {
+  padding: 9px 0;
+  border-top: 1px solid var(--tl-color-muted-1);
+}
+
+.cowart-mind-map-style-section:first-of-type {
+  border-top: 0;
+}
+
+.cowart-mind-map-style-heading {
+  margin-bottom: 7px;
+  color: var(--tl-color-text-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.cowart-mind-map-style-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(66px, 1fr));
+  gap: 5px;
+}
+
+.cowart-mind-map-style-option,
+.cowart-mind-map-style-reset {
+  min-height: 30px;
+  padding: 5px 8px;
+  color: var(--tl-color-text-1);
+  font: 600 11px/1.2 Inter, ui-sans-serif, system-ui, sans-serif;
+  background: var(--tl-color-muted-0);
+  border: 1px solid var(--tl-color-muted-1);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.cowart-mind-map-style-option:hover,
+.cowart-mind-map-style-reset:hover {
+  background: var(--tl-color-muted-1);
+}
+
+.cowart-mind-map-style-option[aria-pressed="true"] {
+  color: var(--tl-color-selected-contrast);
+  background: var(--tl-color-selected);
+  border-color: var(--tl-color-selected);
+}
+
+.cowart-mind-map-style-section[data-disabled="true"] {
+  opacity: 0.45;
+}
+
+.cowart-mind-map-style-option:disabled {
+  cursor: not-allowed;
+}
+
+.cowart-mind-map-color-options {
+  display: grid;
+  grid-template-columns: repeat(10, 24px);
+  gap: 7px;
+}
+
+.cowart-mind-map-color-option {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: var(--cowart-mind-map-swatch);
+  border: 2px solid var(--tl-color-panel);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--tl-color-muted-1);
+  cursor: pointer;
+}
+
+.cowart-mind-map-color-option:hover {
+  transform: scale(1.08);
+}
+
+.cowart-mind-map-color-option[aria-pressed="true"] {
+  box-shadow: 0 0 0 2px var(--tl-color-selected);
+}
+
+.cowart-mind-map-style-reset {
+  width: 100%;
+  margin-top: 10px;
+}
+
+@media (max-width: 520px) {
+  .cowart-mind-map-style-panel {
+    width: min(320px, calc(100vw - 20px));
+  }
+
+  .cowart-mind-map-color-options {
+    grid-template-columns: repeat(5, 24px);
+  }
 }
 
 .cowart-mind-map-collapse-badge {
