@@ -1,6 +1,6 @@
 {
   "name": "cowart-canvas",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,14 +16,14 @@
     "@modelcontextprotocol/ext-apps": "^1.7.4",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@tiptap/pm": "3.27.0",
-    "@tldraw/assets": "^5.1.1",
+    "@tldraw/assets": "5.2.5",
     "@vitejs/plugin-react": "^5.0.0",
     "fractional-indexing": "^3.2.0",
     "html2canvas": "^1.4.1",
     "lucide-react": "^1.24.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "tldraw": "^5.1.1",
+    "tldraw": "5.2.5",
     "vite": "^7.0.0",
     "zod": "^4.4.3"
   }
