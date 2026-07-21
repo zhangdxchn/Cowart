@@ -5,9 +5,10 @@
       "description": "Render and persist the native Cowart Codex widget without opening a localhost page.",
       "command": "node",
       "args": [
-        "./scripts/start-mcp.mjs"
-      ],
-      "cwd": "."
+        "--input-type=module",
+        "--eval",
+        "import { constants } from 'node:fs'; import { access, readdir, readFile, stat } from 'node:fs/promises'; import { homedir } from 'node:os'; import path from 'node:path'; import { pathToFileURL } from 'node:url'; const pluginName = 'cowart'; const startScript = path.join('scripts', 'start-mcp.mjs'); async function candidate(root) { try { const manifest = JSON.parse(await readFile(path.join(root, '.codex-plugin', 'plugin.json'), 'utf8')); if (manifest.name !== pluginName) return null; await access(path.join(root, startScript), constants.R_OK); return { root, version: String(manifest.version || ''), mtimeMs: (await stat(root)).mtimeMs }; } catch { return null; } } async function locatePluginRoot() { const explicitRoot = process.env.COWART_PLUGIN_ROOT?.trim(); if (explicitRoot) { const found = await candidate(path.resolve(explicitRoot)); if (!found) throw new Error('COWART_PLUGIN_ROOT does not point to a valid Cowart plugin installation.'); return found.root; } const codexHome = path.resolve(process.env.CODEX_HOME?.trim() || path.join(homedir(), '.codex')); const cacheRoot = path.join(codexHome, 'plugins', 'cache'); const marketplaces = await readdir(cacheRoot, { withFileTypes: true }).catch(() => []); const candidates = []; for (const marketplace of marketplaces) { if (!marketplace.isDirectory()) continue; const pluginDir = path.join(cacheRoot, marketplace.name, pluginName); const versions = await readdir(pluginDir, { withFileTypes: true }).catch(() => []); for (const version of versions) { if (!version.isDirectory()) continue; const found = await candidate(path.join(pluginDir, version.name)); if (found) candidates.push(found); } } candidates.sort((left, right) => right.version.localeCompare(left.version, undefined, { numeric: true, sensitivity: 'base' }) || right.mtimeMs - left.mtimeMs); if (!candidates.length) throw new Error(`Cowart MCP bootstrap could not find an installed plugin under ${cacheRoot}.`); return candidates[0].root; } const pluginRoot = await locatePluginRoot(); process.env.COWART_PLUGIN_ROOT = pluginRoot; process.chdir(pluginRoot); await import(pathToFileURL(path.join(pluginRoot, startScript)).href);"
+      ]
     }
   }
 }

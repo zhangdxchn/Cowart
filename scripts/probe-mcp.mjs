@@ -1,13 +1,87 @@
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const mcpConfig = JSON.parse(await readFile(path.join(ROOT_DIR, ".mcp.json"), "utf8")).mcpServers.cowart_mcp;
+const mcpCommand = mcpConfig.command === "node" ? process.execPath : mcpConfig.command;
+
+async function createPluginFixture(root, version) {
+  await mkdir(path.join(root, ".codex-plugin"), { recursive: true });
+  await mkdir(path.join(root, "scripts"), { recursive: true });
+  await writeFile(
+    path.join(root, ".codex-plugin", "plugin.json"),
+    `${JSON.stringify({ name: "cowart", version }, null, 2)}\n`,
+  );
+  await writeFile(
+    path.join(root, "scripts", "start-mcp.mjs"),
+    [
+      'import { writeFile } from "node:fs/promises";',
+      'await writeFile(process.env.COWART_BOOTSTRAP_PROBE_FILE, process.env.COWART_PLUGIN_ROOT, "utf8");',
+      "",
+    ].join("\n"),
+  );
+}
+
+async function verifyVersionCacheFailover() {
+  const probeHome = await mkdtemp(path.join(tmpdir(), "cowart-mcp-bootstrap-probe-"));
+  const staleRoot = path.join(probeHome, "plugins", "cache", "personal", "cowart", "0.1.21");
+  const currentRoot = path.join(probeHome, "plugins", "cache", "personal", "cowart", "0.1.22");
+  const resultFile = path.join(probeHome, "selected-plugin-root.txt");
+
+  try {
+    await createPluginFixture(staleRoot, "0.1.21");
+    await createPluginFixture(currentRoot, "0.1.22");
+    await rm(staleRoot, { recursive: true, force: true });
+
+    const childEnv = {
+      ...process.env,
+      CODEX_HOME: probeHome,
+      COWART_BOOTSTRAP_PROBE_FILE: resultFile,
+    };
+    delete childEnv.COWART_PLUGIN_ROOT;
+
+    const child = spawn(mcpCommand, mcpConfig.args, {
+      cwd: mcpConfig.cwd === undefined ? probeHome : staleRoot,
+      env: childEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const exitCode = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code) => resolve(code ?? 1));
+    });
+    if (exitCode !== 0) {
+      throw new Error(`Cowart MCP bootstrap exited with ${exitCode}: ${stderr.trim()}`);
+    }
+
+    const selectedRoot = await readFile(resultFile, "utf8");
+    if (path.resolve(selectedRoot) !== path.resolve(currentRoot)) {
+      throw new Error(`Cowart MCP bootstrap selected ${selectedRoot}, expected ${currentRoot}.`);
+    }
+  } finally {
+    await rm(probeHome, { recursive: true, force: true });
+  }
+}
+
+await verifyVersionCacheFailover();
+
 const transport = new StdioClientTransport({
-  command: "node",
-  args: ["./scripts/start-mcp.mjs"],
+  command: mcpCommand,
+  args: mcpConfig.args,
+  cwd: mcpConfig.cwd === undefined ? ROOT_DIR : path.resolve(ROOT_DIR, mcpConfig.cwd),
+  env: {
+    ...process.env,
+    COWART_PLUGIN_ROOT: ROOT_DIR,
+  },
 });
 
 const client = new Client({
