@@ -10,7 +10,6 @@ import {
   CloudToolbarItem,
   DefaultImageToolbar,
   DefaultImageToolbarContent,
-  DefaultToolbar,
   DefaultColorStyle,
   DefaultStylePanel,
   DefaultStylePanelContent,
@@ -54,32 +53,52 @@ import {
   useEditor,
   useIsEditing,
   useTranslation,
+  useToasts,
   useUiEvents,
   useValue
 } from 'tldraw'
 import { getAssetUrlsByImport } from '@tldraw/assets/imports.vite'
 import { AllSelection } from '@tiptap/pm/state'
-import html2canvas from 'html2canvas'
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Download, FileCode, Image as ImageIcon, Play, X } from 'lucide-react'
+import { renderHtmlDraftDocument } from './htmlDraftCapture.js'
+import { cowartAssetCacheKey, cowartBlobFromBase64, createCowartAssetObjectUrlCache } from './cowartAssetCache.js'
+import { attachCowartFilmController } from './filmPlayback.js'
+import { renderCowartFilmMp4 } from './filmExport.js'
+import { getFilmOptions, buildFilmGenerationPrompt } from './filmConfig.js'
+import { FilmStyleButtons } from './FilmStyleButtons.jsx'
+import { CowartDraggableToolbar } from './CowartDraggableToolbar.jsx'
+import { filmAnalyticsContext, withFilmExportAnalytics } from './filmAnalytics.js'
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Download, FileCode, Film, Image as ImageIcon, Pause, Play, Volume2, VolumeX, X } from 'lucide-react'
 import 'tldraw/tldraw.css'
+import { reportCowartStartup } from './widgetStartup.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import aiHtmlToolIconRaw from './assets/ai-html.svg?raw'
 import aiImageToolIconRaw from './assets/ai-image.svg?raw'
 import aiSlidesToolIconRaw from './assets/ai-slides.svg?raw'
+import aiFilmToolIconRaw from './assets/ai-film.svg?raw'
 import annotationToolIconRaw from './assets/tool-comment.svg?raw'
 import {
+  sendTrackedWidgetMessage,
+  trackAnnotationCreated,
+  trackCanvasOpened,
+  trackFilmFrameCreated,
+  trackFilmPlaybackAction,
+  trackFilmExport
+} from './analytics.js'
+import {
   IS_COWART_WIDGET_BUILD,
+  acceptCowartCanvasSnapshot,
+  copyCowartImageToClipboard,
   downloadCowartFile,
   hasCowartWidgetBridge,
   loadCowartCanvasState,
   readCowartPageAsset,
   refreshCowartCanvasSnapshot,
-  saveCowartCanvasSnapshot,
   saveCowartReferenceImage,
   saveCowartSelectionState,
   saveCowartViewState,
   updateCowartHtmlDraft
 } from './cowartClient.js'
+import { attachCowartCanvasSaveSession, saveCowartEditorSnapshot } from './cowartCanvasSave.js'
 import {
   describeSkippedRecord,
   isCanvasSnapshot,
@@ -103,6 +122,9 @@ const AI_IMAGE_TOOL_ID = 'ai-image'
 const AI_IMAGE_HOLDER_LABEL = 'AI 图片'
 const AI_DRAFT_TOOL_ID = 'ai-draft'
 const AI_DRAFT_HOLDER_LABEL = 'AI HTML'
+const AI_FILM_TOOL_ID = 'ai-film'
+const AI_FILM_LABEL = 'AI 影片'
+const COWART_FILM_STATUS_EVENT = 'cowart:film-status'
 const AI_SLIDES_TOOL_ID = 'ai-slides'
 const AI_SLIDES_LABEL = 'AI Slides'
 const AI_SLIDES_PRESENT_LABEL = '演示 Slides'
@@ -127,7 +149,6 @@ const AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN = 16
 const AI_IMAGE_GENERATION_PANEL_ESTIMATED_H = 226
 const AI_IMAGE_GENERATION_STATUS_RESET_MS = 2200
 const AI_IMAGE_REFERENCE_MAX_FILES = 10
-const SKIPPED_RECORDS_NOTICE_AUTO_HIDE_MS = 5000
 const COWART_HTML_DRAFT_URL_ORIGIN = 'http://cowart.local'
 const COWART_HTML_DRAFT_EMBED_TYPE = 'cowart_html_draft'
 const AI_IMAGE_ASPECT_PRESETS = [
@@ -151,8 +172,11 @@ const ANNOTATION_SELECT_TEXT_MAX_ATTEMPTS = 8
 const ANNOTATION_SELECT_TEXT_SETTLE_ATTEMPTS = 4
 const ANNOTATION_EDIT_TOOL_LABEL = '按标注修改'
 const ANNOTATION_HTML_TOOL_LABEL = '按标注生成 Html'
+const COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE =
+  '本请求来自已经打开的 Cowart 画布；请复用当前画布，不要调用 render_cowart_canvas_widget，除非用户明确要求重新打开或刷新。'
 const ANNOTATION_EDIT_PROMPT = [
-  '[@cowart](plugin://cowart@personal) 按标注修改',
+  '[@Cowart](plugin://cowart@cowart-github) 按标注修改',
+  COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE,
   '',
   '请根据这张 Cowart 截图里的标注修改当前选中的图片：',
   '- 截图包含当前图片，以及连到图片里或图片附近的标注箭头和标注文字。',
@@ -167,7 +191,8 @@ const AI_HTML_LOCAL_ASSET_PROMPT_LINES = [
   '- Cowart 会在将 HTML 放入 iframe 前，通过 read_cowart_page_asset 把 /page-assets/ 图片转换为 data: URL。'
 ]
 const ANNOTATION_HTML_PROMPT = [
-  '[@cowart](plugin://cowart@personal) 按标注生成 AI HTML',
+  '[@Cowart](plugin://cowart@cowart-github) 按标注生成 AI HTML',
+  COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE,
   '',
   '请根据这张 Cowart 截图里的当前图片和周围标注，生成一个新的单文件 HTML 草稿：',
   '- 截图包含当前选中的图片，以及连到图片里或图片附近的标注箭头和标注文字。',
@@ -183,14 +208,18 @@ const ANNOTATION_EDIT_NEAR_MARGIN_MIN = 160
 const ANNOTATION_EDIT_NEAR_MARGIN_MAX = 720
 const ANNOTATION_EDIT_RELATED_TEXT_MARGIN = 120
 const ANNOTATION_EDIT_STATUS_RESET_MS = 2200
+const ANNOTATION_EDIT_MAX_EXPORT_DIMENSION = 4096
+const ANNOTATION_EDIT_MAX_EXPORT_PIXELS = 16_000_000
 const ANNOTATION_EDIT_COLORS = new Set(['red', 'yellow', 'orange'])
 const HTML_DRAFT_CAPTURE_DELAY_MS = 2000
+const HTML_DRAFT_ASSET_RETRY_DELAYS_MS = [0, 200, 600, 1400]
 const HTML_DRAFT_DOM_EDIT_LABEL = '编辑文本'
 const HTML_DRAFT_DOM_EDIT_DONE_LABEL = '完成编辑'
 const HTML_DRAFT_ANNOTATION_EDIT_LABEL = '按标注修改'
 const HTML_DRAFT_ANNOTATION_IMAGE_LABEL = '按标注生图'
 const HTML_DRAFT_ANNOTATION_EDIT_PROMPT = [
-  '[@cowart](plugin://cowart@personal) 按标注修改 AI HTML',
+  '[@Cowart](plugin://cowart@cowart-github) 按标注修改 AI HTML',
+  COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE,
   '',
   '请根据这张 Cowart 截图里的标注修改当前选中的 HTML 草稿：',
   '- 截图包含当前 HTML 草稿，以及草稿周围的标注箭头和标注文字。',
@@ -202,7 +231,8 @@ const HTML_DRAFT_ANNOTATION_EDIT_PROMPT = [
   '- 不要覆盖原草稿的 HTML 文件、shape 或画布记录。'
 ].join('\n')
 const HTML_DRAFT_ANNOTATION_IMAGE_PROMPT = [
-  '[@cowart](plugin://cowart@personal) 按标注生图',
+  '[@Cowart](plugin://cowart@cowart-github) 按标注生图',
+  COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE,
   '',
   '请使用内置 imagegen skill，根据这张 Cowart 截图里的 HTML 草稿和标注生成一张新的干净位图：',
   '- 截图包含当前 HTML 草稿，以及草稿周围的标注箭头和标注文字。',
@@ -212,7 +242,8 @@ const HTML_DRAFT_ANNOTATION_IMAGE_PROMPT = [
   '- 保留原 HTML 草稿和原标注不动，把生成的图片放到草稿右侧。'
 ].join('\n')
 const AI_IMAGE_GENERATION_PROMPT_PREFIX = [
-  '[@cowart](plugin://cowart@personal) 生成图片',
+  '[@Cowart](plugin://cowart@cowart-github) 生成图片',
+  COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE,
   '',
   '请根据下面的 prompt 生成一张图片，并替换当前选中的 Cowart AI 图片框；最终画布里应留下普通图片形状，不保留 AI 图片框容器。',
   '默认生成一张；如果用户在 prompt 中明确要求多张图片，则用户要求的数量优先于上面的单数措辞。',
@@ -223,7 +254,8 @@ const AI_IMAGE_GENERATION_PROMPT_PREFIX = [
   '不需要选择生图模型，使用 Codex 当前可用的图片生成能力。'
 ].join('\n')
 const AI_DRAFT_GENERATION_PROMPT_PREFIX = [
-  '[@cowart](plugin://cowart@personal) 生成 AI HTML',
+  '[@Cowart](plugin://cowart@cowart-github) 生成 AI HTML',
+  COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE,
   '',
   '请根据下面的 prompt 生成一个单文件 HTML 草稿，并把它嵌入当前选中的 Cowart AI HTML 框。',
   '默认生成一个 HTML；如果用户在 prompt 中明确要求多个 HTML、多个方案或多张页面，则用户要求的数量优先于上面的单数措辞。',
@@ -235,7 +267,8 @@ const AI_DRAFT_GENERATION_PROMPT_PREFIX = [
   '完成后调用 Cowart MCP 工具 insert_cowart_html_draft，把 htmlContent 写入当前 page 的 canvas/pages/<page-id>/assets/，并替换对应 AI HTML 框为 HTML embed。'
 ].join('\n')
 const AI_SLIDES_GENERATION_PROMPT_PREFIX = [
-  '[@cowart](plugin://cowart@personal) 生成 AI Slides',
+  '[@Cowart](plugin://cowart@cowart-github) 生成 AI Slides',
+  COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE,
   '',
   '请根据下面的 prompt 生成一套视觉与叙事连贯的 AI Slides。',
   '每一页都必须是完整、独立、可运行的单文件 HTML；CSS 和 JS 尽量内联。',
@@ -243,7 +276,8 @@ const AI_SLIDES_GENERATION_PROMPT_PREFIX = [
   ...AI_HTML_LOCAL_ASSET_PROMPT_LINES
 ].join('\n')
 const AI_SLIDES_ANNOTATION_EDIT_PROMPT = [
-  '[@cowart](plugin://cowart@personal) 按标注修改 AI Slides',
+  '[@Cowart](plugin://cowart@cowart-github) 按标注修改 AI Slides',
+  COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE,
   '',
   '请根据 Cowart 截图中的原 AI Slides 和周围标注，生成一套修改后的新 Slides。',
   '原 AI Slides 和标注必须保持不动；新的目标 AI Slides 已经创建在原 Slides 下方，请只把修改后的页面加入新 Slides。',
@@ -267,6 +301,14 @@ const aiHtmlToolIcon = (
     dangerouslySetInnerHTML={{ __html: aiHtmlToolIconSvg }}
   />
 )
+const aiFilmToolIconSvg = aiFilmToolIconRaw.replaceAll('black', 'currentColor')
+const aiFilmToolIcon = (
+  <div
+    aria-hidden="true"
+    className="cowart-ai-frame-tool-icon"
+    dangerouslySetInnerHTML={{ __html: aiFilmToolIconSvg }}
+  />
+)
 const aiSlidesToolIconSvg = aiSlidesToolIconRaw.replaceAll('black', 'currentColor')
 const aiSlidesToolIcon = (
   <div
@@ -287,10 +329,17 @@ const iconSvgSources = import.meta.glob(
   { eager: true, query: '?raw', import: 'default' }
 )
 const cowartAssetUrls = buildCowartAssetUrls()
-const cowartAssetObjectUrlCache = new Map()
-const cowartAssetSourceKeys = new Map()
+const cowartAssetObjectUrlCache = createCowartAssetObjectUrlCache({
+  getKey: (asset) => `${window.openai?.toolOutput?.canvasDir || window.openai?.toolOutput?.projectDir || ''}\u001e${cowartAssetCacheKey(asset)}`,
+  async load(asset, signal) {
+    const pageAsset = await readCowartPageAsset(asset.props.src, { signal })
+    return blobFromBase64(pageAsset.dataBase64, pageAsset.mimeType)
+  }
+})
 const cowartHtmlDraftIframes = new Map()
 const cowartHtmlDraftDomEditSessions = new Map()
+const cowartFilmControllers = new Map()
+const cowartFilmStatuses = new Map()
 const cowartPendingSlidesPastes = new WeakMap()
 const cowartCopiedContent = new WeakMap()
 
@@ -325,7 +374,7 @@ function isCowartLocalAssetUrl(src) {
 const COWART_HTML_DRAFT_LOCAL_IMAGE_PATTERN =
   /(?:https?:\/\/cowart\.local)?(\/(?:page-assets|assets)\/[^"'()\s<>?#]+\.(?:apng|avif|gif|jpe?g|png|svg|webp))(?:[?#][^"'()\s<>]*)?/gi
 
-async function hydrateCowartHtmlDraftLocalImages(htmlContent) {
+async function hydrateCowartHtmlDraftLocalImages(htmlContent, options = {}) {
   if (typeof htmlContent !== 'string' || !htmlContent || !hasCowartWidgetBridge()) return htmlContent
 
   const references = new Map()
@@ -334,23 +383,25 @@ async function hydrateCowartHtmlDraftLocalImages(htmlContent) {
   }
   if (!references.size) return htmlContent
 
-  const replacements = await Promise.all(
-    Array.from(references.entries()).map(async ([reference, assetUrl]) => {
-      try {
-        const asset = await readCowartPageAsset(assetUrl)
-        if (!asset?.dataBase64 || !asset?.mimeType?.startsWith('image/')) return null
-        return [reference, `data:${asset.mimeType};base64,${asset.dataBase64}`]
-      } catch (error) {
-        console.warn(`Cowart could not hydrate HTML draft image ${assetUrl}.`, error)
-        return null
+  const replacements = new Map()
+  // HTML can contain several full-resolution references. Read each file once
+  // and sequentially so the bridge does not hold every base64 response at once.
+  for (const assetUrl of new Set(references.values())) {
+    try {
+      options.signal?.throwIfAborted()
+      const asset = await readCowartPageAsset(assetUrl, options)
+      if (asset?.dataBase64 && asset?.mimeType?.startsWith('image/')) {
+        replacements.set(assetUrl, `data:${asset.mimeType};base64,${asset.dataBase64}`)
       }
-    })
-  )
+    } catch (error) {
+      if (error.name === 'AbortError') throw error
+      console.warn(`Cowart could not hydrate HTML draft image ${assetUrl}.`, error)
+    }
+  }
 
-  return replacements.filter(Boolean).reduce(
-    (result, [reference, dataUrl]) => result.split(reference).join(dataUrl),
-    htmlContent
-  )
+  // Build one hydrated document, avoiding a full intermediate copy per image.
+  return htmlContent.replace(COWART_HTML_DRAFT_LOCAL_IMAGE_PATTERN,
+    (reference) => replacements.get(references.get(reference)) || reference)
 }
 
 function isCowartHtmlDraftAssetUrl(src) {
@@ -380,43 +431,29 @@ function cowartHtmlDraftVirtualUrl(assetUrl) {
   return normalizedAssetUrl ? `${COWART_HTML_DRAFT_URL_ORIGIN}${normalizedAssetUrl}` : ''
 }
 
-function cowartAssetCacheKey(asset) {
-  const src = asset?.props?.src ?? ''
-  const fileSize = asset?.props?.fileSize ?? ''
-  const mimeType = asset?.props?.mimeType ?? ''
-  const name = asset?.props?.name ?? ''
-  return [src, fileSize, mimeType, name].join('\u001f')
-}
-
-function revokeCowartCachedAsset(cacheKey) {
-  const cached = cowartAssetObjectUrlCache.get(cacheKey)
-  if (!cached) return
-  URL.revokeObjectURL(cached.objectUrl)
-  cowartAssetObjectUrlCache.delete(cacheKey)
-  if (cowartAssetSourceKeys.get(cached.src) === cacheKey) {
-    cowartAssetSourceKeys.delete(cached.src)
-  }
-}
-
 function revokeCowartAssetObjectUrls() {
-  for (const cacheKey of Array.from(cowartAssetObjectUrlCache.keys())) {
-    revokeCowartCachedAsset(cacheKey)
-  }
+  cowartAssetObjectUrlCache.clear()
+}
+
+function retainCowartEditorAssets(editor) {
+  const assets = editor.getCurrentPageShapes()
+    .map((shape) => shape?.props?.assetId ? editor.getAsset(shape.props.assetId) : null)
+    .filter(Boolean)
+  cowartAssetObjectUrlCache.retain(assets)
+}
+
+function cowartAssetReferencesChanged(changes) {
+  if (Object.values(changes.added).some((record) => record.typeName === 'asset' || record.typeName === 'shape')) return true
+  if (Object.values(changes.removed).some((record) => record.typeName === 'asset' || record.typeName === 'shape')) return true
+  return Object.values(changes.updated).some(([previous, next]) =>
+    next.typeName === 'asset' ||
+    (next.typeName === 'shape' && (previous.props?.assetId !== next.props?.assetId || previous.parentId !== next.parentId)) ||
+    (next.typeName === 'instance' && previous.currentPageId !== next.currentPageId)
+  )
 }
 
 function blobFromBase64(dataBase64, mimeType) {
-  const binary = window.atob(String(dataBase64 || ''))
-  const chunks = []
-  const chunkSize = 8192
-  for (let offset = 0; offset < binary.length; offset += chunkSize) {
-    const slice = binary.slice(offset, offset + chunkSize)
-    const bytes = new Uint8Array(slice.length)
-    for (let index = 0; index < slice.length; index += 1) {
-      bytes[index] = slice.charCodeAt(index)
-    }
-    chunks.push(bytes)
-  }
-  return new Blob(chunks, { type: mimeType || 'application/octet-stream' })
+  return cowartBlobFromBase64(dataBase64, mimeType)
 }
 
 async function resolveCowartTldrawAssetUrl(asset) {
@@ -424,21 +461,8 @@ async function resolveCowartTldrawAssetUrl(asset) {
   if (!src) return null
   if (!hasCowartWidgetBridge() || !isCowartLocalAssetUrl(src)) return src
 
-  const cacheKey = cowartAssetCacheKey(asset)
-  const cached = cowartAssetObjectUrlCache.get(cacheKey)
-  if (cached) return cached.objectUrl
-
-  const previousKey = cowartAssetSourceKeys.get(src)
-  if (previousKey && previousKey !== cacheKey) {
-    revokeCowartCachedAsset(previousKey)
-  }
-
   try {
-    const pageAsset = await readCowartPageAsset(src)
-    const objectUrl = URL.createObjectURL(blobFromBase64(pageAsset.dataBase64, pageAsset.mimeType))
-    cowartAssetObjectUrlCache.set(cacheKey, { objectUrl, src })
-    cowartAssetSourceKeys.set(src, cacheKey)
-    return objectUrl
+    return await cowartAssetObjectUrlCache.resolve(asset)
   } catch (error) {
     console.warn('Cowart could not resolve local page asset through MCP; falling back to source URL.', error)
     return src
@@ -546,6 +570,14 @@ function isAiDraftHolderShape(shape) {
   return shape?.type === 'frame' && shape.meta?.cowartAiDraftHolder === true
 }
 
+function isAiFilmHolderShape(shape) {
+  return isAiDraftHolderShape(shape) && shape.meta?.cowartAiFilmHolder === true
+}
+
+function isCowartFilmShape(shape) {
+  return isCowartHtmlDraftEmbedShape(shape) && shape.meta?.cowartFilm === true
+}
+
 function isAiSlidesShape(shape) {
   return shape?.type === 'frame' && shape.meta?.cowartAiSlides === true
 }
@@ -569,22 +601,6 @@ function isCowartHtmlDraftEmbedShape(shape) {
 
 function isImageShape(shape) {
   return shape?.type === 'image'
-}
-
-function isImageShapeRecord(record) {
-  return record?.typeName === 'shape' && record.type === 'image'
-}
-
-function recordValues(records) {
-  return Object.values(records || {})
-}
-
-function collectRemovedImageShapeIds(changes) {
-  const imageShapeIds = []
-  for (const removedRecord of recordValues(changes?.removed)) {
-    if (isImageShapeRecord(removedRecord)) imageShapeIds.push(removedRecord.id)
-  }
-  return imageShapeIds
 }
 
 function isAiImageAspectLocked(shape) {
@@ -714,6 +730,29 @@ function createAiDraftHolderAtViewportCenter(editor) {
   editor.setCurrentTool('select.idle')
 }
 
+function createAiFilmHolderShape(editor, id, shapeOverrides = {}) {
+  const { meta, props, ...rest } = shapeOverrides
+  const result = createAiDraftHolderShape(editor, id, {
+    ...rest,
+    meta: { cowartAiFilmHolder: true, cowartFilmStyle: 'product-launch', cowartFilmDuration: 15, cowartFilmMuted: false, ...meta },
+    props: { name: AI_FILM_LABEL, ...props }
+  })
+  const shape = editor.getShape(id)
+  if (shape) trackFilmFrameCreated(filmAnalyticsContext(shape))
+  return result
+}
+
+function createAiFilmHolderAtViewportCenter(editor) {
+  const scale = editor.getResizeScaleFactor()
+  const w = AI_DRAFT_HOLDER_DEFAULT_W * scale
+  const h = AI_DRAFT_HOLDER_DEFAULT_H * scale
+  const center = editor.getViewportPageBounds().center
+  const id = createShapeId()
+  createAiFilmHolderShape(editor, id, { x: center.x - w / 2, y: center.y - h / 2, props: { w, h } })
+  editor.select(id)
+  editor.setCurrentTool('select.idle')
+}
+
 function createAiSlidesShape(editor, id, shapeOverrides = {}) {
   const scale = editor.getResizeScaleFactor()
   const { meta, props, ...shapeRecordOverrides } = shapeOverrides
@@ -833,11 +872,11 @@ function adoptGeneratedAiSlidesItems(editor) {
 function normalizeAiDraftHolderLabels(editor) {
   const updates = editor
     .getCurrentPageShapes()
-    .filter((shape) => isAiDraftHolderShape(shape) && shape.props?.name !== AI_DRAFT_HOLDER_LABEL)
+    .filter((shape) => isAiDraftHolderShape(shape) && shape.props?.name !== (isAiFilmHolderShape(shape) ? AI_FILM_LABEL : AI_DRAFT_HOLDER_LABEL))
     .map((shape) => ({
       id: shape.id,
       type: shape.type,
-      props: { name: AI_DRAFT_HOLDER_LABEL }
+      props: { name: isAiFilmHolderShape(shape) ? AI_FILM_LABEL : AI_DRAFT_HOLDER_LABEL }
     }))
 
   if (updates.length) editor.updateShapes(updates)
@@ -1253,6 +1292,35 @@ function getAnnotationEditExportPixelRatio(bounds) {
   return 2
 }
 
+function getAnnotationEditExportSize(exportBounds) {
+  const pixelRatio = getAnnotationEditExportPixelRatio(exportBounds)
+  return {
+    pixelRatio,
+    width: Math.max(1, Math.round(exportBounds.w * pixelRatio)),
+    height: Math.max(1, Math.round(exportBounds.h * pixelRatio))
+  }
+}
+
+function isAnnotationEditExportTooLarge({ width, height }) {
+  return (
+    Math.max(width, height) > ANNOTATION_EDIT_MAX_EXPORT_DIMENSION ||
+    width * height > ANNOTATION_EDIT_MAX_EXPORT_PIXELS
+  )
+}
+
+function prepareAnnotationEditRequest(editor, imageShapeId) {
+  const shapeIds = collectAnnotationEditShapeIds(editor, imageShapeId)
+  const rawBounds = editor.getShapesPageBounds(shapeIds)
+  if (!rawBounds) throw new Error('无法计算截图范围。')
+
+  const exportBounds = expandBox(rawBounds, ANNOTATION_EDIT_EXPORT_PADDING)
+  return {
+    shapeIds,
+    exportBounds,
+    exportSize: getAnnotationEditExportSize(exportBounds)
+  }
+}
+
 function annotationEditScreenshotFileName() {
   const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
   return `annotation-edit-${timestamp}.png`
@@ -1278,13 +1346,16 @@ function dataUrlToImageContent(dataUrl, meta = {}) {
 }
 
 function followUpSender() {
+  let sendMessage = null
   if (typeof window.cowartMcp?.sendFollowUpMessage === 'function') {
-    return (message) => window.cowartMcp.sendFollowUpMessage(message)
+    sendMessage = (message) => window.cowartMcp.sendFollowUpMessage(message)
+  } else if (typeof window.openai?.sendFollowUpMessage === 'function') {
+    sendMessage = (message) => window.openai.sendFollowUpMessage(message)
   }
-  if (typeof window.openai?.sendFollowUpMessage === 'function') {
-    return (message) => window.openai.sendFollowUpMessage(message)
-  }
-  return null
+  if (!sendMessage) return null
+
+  return (message, analyticsContext = {}) =>
+    sendTrackedWidgetMessage(sendMessage, message, analyticsContext)
 }
 
 function cowartHostCapabilities() {
@@ -1304,19 +1375,15 @@ function supportsCowartMessageImages() {
   return Boolean(cowartHostCapabilities()?.message?.image)
 }
 
-async function sendAnnotationEditRequest(editor, imageShapeId) {
-  const shapeIds = collectAnnotationEditShapeIds(editor, imageShapeId)
-  const rawBounds = editor.getShapesPageBounds(shapeIds)
-  if (!rawBounds) throw new Error('无法计算截图范围。')
-
-  const exportBounds = expandBox(rawBounds, ANNOTATION_EDIT_EXPORT_PADDING)
+async function sendAnnotationEditRequest(editor, imageShapeId, request) {
+  const { shapeIds, exportBounds, exportSize } = request
   const exportResult = await editor.toImageDataUrl(shapeIds, {
     bounds: exportBounds,
     background: true,
     darkMode: false,
     format: 'png',
     padding: 0,
-    pixelRatio: getAnnotationEditExportPixelRatio(exportBounds)
+    pixelRatio: exportSize.pixelRatio
   })
   const screenshotAsset = await saveCowartReferenceImage({
     anchorShapeId: imageShapeId,
@@ -1350,7 +1417,10 @@ async function sendAnnotationEditRequest(editor, imageShapeId) {
     )
   }
 
-  return sender({ prompt, content })
+  return sender(
+    { prompt, content },
+    { promptType: 'annotation_edit', hasReference: true }
+  )
 }
 
 async function sendAnnotationHtmlRequest(editor, imageShapeId) {
@@ -1399,7 +1469,10 @@ async function sendAnnotationHtmlRequest(editor, imageShapeId) {
     )
   }
 
-  return sender({ prompt, content })
+  return sender(
+    { prompt, content },
+    { promptType: 'annotation_html', aiType: 'html', hasReference: true }
+  )
 }
 
 async function waitForHtmlDraftDocument(shapeId) {
@@ -1758,37 +1831,10 @@ async function renderCowartHtmlDraftCanvas(shape, pixelRatio) {
   const width = Math.max(1, Number(shape.props.w) || AI_IMAGE_HOLDER_DEFAULT_W)
   const height = Math.max(1, Number(shape.props.h) || AI_IMAGE_HOLDER_DEFAULT_H)
   const captureRatio = Math.max(1, Number(pixelRatio) || 1)
-  const canvas = await html2canvas(iframeDocument.documentElement, {
-    allowTaint: false,
-    backgroundColor: '#ffffff',
-    height,
-    logging: false,
-    onclone(clonedDocument) {
-      clonedDocument.querySelectorAll('script').forEach((script) => script.remove())
-      for (const animation of clonedDocument.getAnimations?.() || []) {
-        try {
-          const timing = animation.effect?.getComputedTiming?.()
-          if (Number.isFinite(timing?.endTime)) animation.finish()
-        } catch (_error) {
-          // Infinite or detached animations cannot be finished; pausing below still stabilizes them.
-        }
-      }
-      const captureStyle = clonedDocument.createElement('style')
-      captureStyle.textContent = `
-        html, body { width: ${width}px !important; height: ${height}px !important; }
-        *, *::before, *::after { animation-play-state: paused !important; caret-color: transparent !important; transition: none !important; }
-      `
-      clonedDocument.head?.append(captureStyle)
-    },
-    scale: captureRatio,
-    scrollX: 0,
-    scrollY: 0,
-    useCORS: true,
+  const canvas = await renderHtmlDraftDocument(iframeDocument, {
     width,
-    windowHeight: height,
-    windowWidth: width,
-    x: 0,
-    y: 0
+    height,
+    pixelRatio: captureRatio
   })
   return {
     canvas,
@@ -1984,7 +2030,8 @@ async function downloadCowartImageShape(editor, imageShape) {
 async function exportCowartHtmlDraft(editor, draftShapeId, format) {
   const shape = editor.getShape(draftShapeId)
   if (format === 'html') {
-    const htmlContent = await readCowartHtmlDraftContent(shape)
+    const source = await readCowartHtmlDraftContent(shape)
+    const htmlContent = isCowartFilmShape(shape) ? await hydrateCowartHtmlDraftLocalImages(source) : source
     const fileName = htmlDraftExportFileName(shape, 'html')
     const dataUrl = textDataUrl(htmlContent, 'text/html')
     if (hasCowartWidgetBridge()) {
@@ -2010,6 +2057,33 @@ async function exportCowartHtmlDraft(editor, draftShapeId, format) {
 
   downloadDataUrl(exportResult.url, fileName)
   return { fileName }
+}
+
+async function exportCowartFilm(editor, draftShapeId, onProgress, signal) {
+  const shape = editor.getShape(draftShapeId)
+  if (!isCowartFilmShape(shape)) throw new Error('请选择 AI 影片。')
+  return withFilmExportAnalytics(async () => {
+    // A separate iframe renders from zero without changing the preview or edits.
+    const html = await hydrateCowartHtmlDraftLocalImages(await readCowartHtmlDraftContent(shape))
+    const blob = await renderCowartFilmMp4({ html, width: Number(shape.props.w), height: Number(shape.props.h),
+      duration: getFilmOptions(shape).duration, onProgress, signal })
+    signal?.throwIfAborted()
+    const fileName = htmlDraftExportFileName(shape, 'mp4')
+    if (hasCowartWidgetBridge()) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result)
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(blob)
+      })
+      signal?.throwIfAborted()
+      return downloadCowartFile({ dataUrl, fileName, mimeType: 'video/mp4' })
+    }
+    const url = URL.createObjectURL(blob)
+    downloadDataUrl(url, fileName)
+    window.setTimeout(() => URL.revokeObjectURL(url), 60000)
+    return { fileName }
+  }, filmAnalyticsContext(shape), trackFilmExport, signal)
 }
 
 async function exportCowartSlides(editor, slidesShapeId, format) {
@@ -2327,9 +2401,7 @@ async function sendAiSlidesAnnotationEditRequest(editor, slidesShapeId) {
   const targetSlidesShapeId = createAiSlidesBelowSource(editor, sourceSlidesShape)
 
   try {
-    const saveResult = await saveCowartCanvasSnapshot(editor.store.getStoreSnapshot(), {
-      protectImageRecords: true
-    })
+    const saveResult = await saveCowartEditorSnapshot(editor)
     if (saveResult?.ok === false) throw new Error(saveResult.message || '新的 AI Slides 保存失败。')
 
     const prompt = buildAiSlidesAnnotationEditPrompt({
@@ -2352,10 +2424,18 @@ async function sendAiSlidesAnnotationEditRequest(editor, slidesShapeId) {
         })
       )
     }
-    return await sender({ prompt, content })
+    return await sender(
+      { prompt, content },
+      {
+        promptType: 'slides_annotation_edit',
+        aiType: 'slides',
+        hasReference: true,
+        pageCount: sourceItems.length
+      }
+    )
   } catch (error) {
     editor.deleteShapes([targetSlidesShapeId])
-    await saveCowartCanvasSnapshot(editor.store.getStoreSnapshot(), { protectImageRecords: true })
+    await saveCowartEditorSnapshot(editor)
     throw error
   }
 }
@@ -2457,7 +2537,14 @@ async function sendHtmlDraftAnnotationRequest(editor, draftShapeId, mode) {
     )
   }
 
-  return sender({ prompt, content })
+  return sender(
+    { prompt, content },
+    {
+      promptType: mode === 'edit' ? 'html_annotation_edit' : 'html_annotation_image',
+      aiType: mode === 'edit' ? 'html' : 'image',
+      hasReference: true
+    }
+  )
 }
 
 function clampNumber(value, min, max) {
@@ -2480,7 +2567,7 @@ function formatAiImageGenerationTarget(shape) {
   }
 }
 
-function getAiImageGenerationPanelLayout(editor, shapeId) {
+function getAiImageGenerationPanelLayout(editor, shapeId, panelHeight = AI_IMAGE_GENERATION_PANEL_ESTIMATED_H) {
   const bounds = editor.getShapePageBounds(shapeId)
   if (!bounds) return null
 
@@ -2501,11 +2588,13 @@ function getAiImageGenerationPanelLayout(editor, shapeId) {
     AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN,
     Math.max(AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN, viewportWidth - panelWidth - AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN)
   )
+  // The taller film panel must clear the fixed bottom tool palette.
+  const bottomMargin = panelHeight > AI_IMAGE_GENERATION_PANEL_ESTIMATED_H ? 88 : AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN
   const preferredTop = bottomLeft.y + AI_IMAGE_GENERATION_PANEL_OFFSET
   const panelTop = clampNumber(
     preferredTop,
     AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN,
-    Math.max(AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN, viewportHeight - AI_IMAGE_GENERATION_PANEL_ESTIMATED_H - AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN)
+    Math.max(AI_IMAGE_GENERATION_PANEL_VIEWPORT_MARGIN, viewportHeight - panelHeight - bottomMargin)
   )
 
   return {
@@ -2584,6 +2673,18 @@ function buildAiDraftGenerationPrompt({ holderShape, userPrompt, references, ref
   ].join('\n')
 }
 
+function buildAiFilmGenerationPrompt({ holderShape, userPrompt, references, referenceAttached }) {
+  const target = formatAiImageGenerationTarget(holderShape)
+  return buildFilmGenerationPrompt({
+    holderShape,
+    userPrompt,
+    target,
+    referenceLines: aiImageReferenceLines({ references, referenceAttached }),
+    canvasContext: window.openai?.toolOutput || {},
+    alreadyOpenLine: COWART_WIDGET_ALREADY_OPEN_PROMPT_LINE
+  })
+}
+
 function buildAiSlidesGenerationPrompt({ slidesShape, pageCount, userPrompt, references, referenceAttached }) {
   const referenceLines = aiImageReferenceLines({ references, referenceAttached })
 
@@ -2633,6 +2734,18 @@ function clipboardImageFiles(event) {
 
 function stopEditorOverlayEvent(event) {
   event.stopPropagation()
+}
+
+function handleGenerationPromptKeyDown(event, submit) {
+  stopEditorOverlayEvent(event)
+  if (
+    event.key !== 'Enter' || event.shiftKey || event.altKey ||
+    event.isComposing || event.nativeEvent?.isComposing ||
+    event.keyCode === 229 || event.nativeEvent?.keyCode === 229
+  ) return
+
+  event.preventDefault()
+  if (!event.repeat) submit(event)
 }
 
 async function sendAiImageGenerationRequest({ holderShape, userPrompt, referenceFiles = [] }) {
@@ -2688,7 +2801,14 @@ async function sendAiImageGenerationRequest({ holderShape, userPrompt, reference
     }
   }
 
-  return sender({ prompt, content })
+  return sender(
+    { prompt, content },
+    {
+      promptType: 'ai_image',
+      aiType: 'image',
+      hasReference: imageReferences.length > 0
+    }
+  )
 }
 
 async function sendAiDraftGenerationRequest({ holderShape, userPrompt, referenceFiles = [] }) {
@@ -2724,7 +2844,7 @@ async function sendAiDraftGenerationRequest({ holderShape, userPrompt, reference
     references.push({ file: referenceFile, dataUrl: referenceDataUrl, savedReference })
   }
 
-  const prompt = buildAiDraftGenerationPrompt({
+  const prompt = (isAiFilmHolderShape(holderShape) ? buildAiFilmGenerationPrompt : buildAiDraftGenerationPrompt)({
     holderShape,
     userPrompt,
     references,
@@ -2744,7 +2864,15 @@ async function sendAiDraftGenerationRequest({ holderShape, userPrompt, reference
     }
   }
 
-  return sender({ prompt, content })
+  return sender(
+    { prompt, content },
+    {
+      promptType: isAiFilmHolderShape(holderShape) ? 'ai_film' : 'ai_html',
+      aiType: isAiFilmHolderShape(holderShape) ? 'film' : 'html',
+      hasReference: imageReferences.length > 0,
+      ...(isAiFilmHolderShape(holderShape) ? filmAnalyticsContext(holderShape) : {})
+    }
+  )
 }
 
 async function sendAiSlidesGenerationRequest({ slidesShape, pageCount, userPrompt, referenceFiles = [] }) {
@@ -2801,7 +2929,15 @@ async function sendAiSlidesGenerationRequest({ slidesShape, pageCount, userPromp
     }
   }
 
-  return sender({ prompt, content })
+  return sender(
+    { prompt, content },
+    {
+      promptType: 'ai_slides',
+      aiType: 'slides',
+      hasReference: imageReferences.length > 0,
+      pageCount
+    }
+  )
 }
 
 class CowartAnnotationTool extends StateNode {
@@ -2941,6 +3077,7 @@ class CowartAnnotationPointing extends StateNode {
       }
     ])
 
+    trackAnnotationCreated()
     startEditingAnnotationArrowLabel(this.editor, this.arrowId)
   }
 
@@ -3009,25 +3146,46 @@ function CowartHtmlDraftEmbed({ shape }) {
   useEffect(() => {
     setHtmlSource(null)
     setLoadError(null)
-    const shouldReadPageAsset = draftAssetUrl && hasCowartWidgetBridge()
-    const browserSourceUrl = !shouldReadPageAsset && (draftAssetUrl || directHtmlUrl)
+    // Read saved drafts lazily through MCP; still support legacy inline drafts
+    // while they are being migrated to compact file-backed records.
+    const shouldReadPageAsset = !directHtmlUrl && draftAssetUrl && hasCowartWidgetBridge()
+    const browserSourceUrl = directHtmlUrl || (!shouldReadPageAsset && draftAssetUrl)
     if (!shouldReadPageAsset && !browserSourceUrl) return undefined
 
     let isDisposed = false
+    const controller = new AbortController()
+
+    async function readDraftAssetWithRetry() {
+      let lastError = null
+      for (const delay of HTML_DRAFT_ASSET_RETRY_DELAYS_MS) {
+        if (isDisposed) return null
+        if (delay > 0) await new Promise((resolve) => window.setTimeout(resolve, delay))
+        if (isDisposed) return null
+        try {
+          const pageAsset = await readCowartPageAsset(draftAssetUrl, { signal: controller.signal })
+          return blobFromBase64(pageAsset.dataBase64, pageAsset.mimeType).text()
+        } catch (error) {
+          if (error.name === 'AbortError') throw error
+          lastError = error
+        }
+      }
+      throw lastError || new Error('HTML 草稿加载失败')
+    }
 
     const htmlSourcePromise = shouldReadPageAsset
-      ? readCowartPageAsset(draftAssetUrl).then((pageAsset) =>
-          blobFromBase64(pageAsset.dataBase64, pageAsset.mimeType).text()
-        )
-      : window.fetch(browserSourceUrl).then((response) => {
+      ? readDraftAssetWithRetry()
+      : window.fetch(browserSourceUrl, { signal: controller.signal }).then((response) => {
           if (!response.ok) throw new Error(`HTML 草稿加载失败：${response.status}`)
           return response.text()
         })
 
     htmlSourcePromise
-      .then((htmlContent) => hasCowartWidgetBridge() ? hydrateCowartHtmlDraftLocalImages(htmlContent) : htmlContent)
       .then((htmlContent) => {
-        if (isDisposed) return
+        if (isDisposed || htmlContent === null) return null
+        return hasCowartWidgetBridge() ? hydrateCowartHtmlDraftLocalImages(htmlContent, { signal: controller.signal }) : htmlContent
+      })
+      .then((htmlContent) => {
+        if (isDisposed || htmlContent === null) return
         setHtmlSource(htmlContent)
       })
       .catch((error) => {
@@ -3038,22 +3196,57 @@ function CowartHtmlDraftEmbed({ shape }) {
 
     return () => {
       isDisposed = true
+      controller.abort()
     }
-  }, [directHtmlUrl, draftAssetUrl])
+  }, [directHtmlUrl, draftAssetUrl, shape.meta?.cowartHtmlDraftContentHash])
+
+  useEffect(() => {
+    if (!isCowartFilmShape(shape) || !htmlSource || !frameLoadVersion) return undefined
+    const iframe = cowartHtmlDraftIframes.get(shape.id)
+    if (!iframe?.contentDocument?.body) return undefined
+    const options = getFilmOptions(shape)
+    const controller = attachCowartFilmController(iframe, {
+      duration: options.duration,
+      muted: options.muted,
+      onStatus(status) {
+        cowartFilmStatuses.set(shape.id, status)
+        window.dispatchEvent(new CustomEvent(COWART_FILM_STATUS_EVENT, { detail: { shapeId: shape.id, status } }))
+      }
+    })
+    cowartFilmControllers.set(shape.id, controller)
+    return () => {
+      controller.dispose()
+      if (cowartFilmControllers.get(shape.id) === controller) cowartFilmControllers.delete(shape.id)
+      cowartFilmStatuses.delete(shape.id)
+    }
+  }, [shape.id, shape.meta?.cowartFilm, htmlSource, frameLoadVersion])
+
+  useEffect(() => {
+    if (!isCowartFilmShape(shape)) return
+    const muted = shape.meta?.cowartFilmMuted === true
+    if (cowartFilmStatuses.get(shape.id)?.muted !== muted) {
+      cowartFilmControllers.get(shape.id)?.command('mute', muted)
+    }
+  }, [shape.id, shape.meta?.cowartFilm, shape.meta?.cowartFilmMuted, frameLoadVersion])
 
   const persistDomEdits = useCallback(
     async (htmlContent) => {
-      const result = await updateCowartHtmlDraft({ draftShapeId: shape.id, htmlContent })
-      const latestShape = editor.getShape(shape.id)
-      if (!isCowartHtmlDraftEmbedShape(latestShape)) return
-      editor.updateShape({
-        id: shape.id,
-        type: 'embed',
-        meta: {
-          ...latestShape.meta,
-          ...(result?.assetUrl ? { cowartHtmlDraftAssetUrl: result.assetUrl } : {})
-        },
-        props: { url: cowartHtmlDraftDataUrl(htmlContent) }
+      await updateCowartHtmlDraft({ draftShapeId: shape.id, htmlContent }, {
+        applyResult(result) {
+          const latestShape = editor.getShape(shape.id)
+          if (!isCowartHtmlDraftEmbedShape(latestShape)) return false
+          editor.updateShape({
+            id: shape.id,
+            type: 'embed',
+            meta: {
+              ...latestShape.meta,
+              ...(result?.assetUrl ? { cowartHtmlDraftAssetUrl: result.assetUrl } : {}),
+              ...(result?.contentHash ? { cowartHtmlDraftContentHash: result.contentHash } : {})
+            },
+            props: { url: result?.assetUrl ? cowartHtmlDraftVirtualUrl(result.assetUrl) : cowartHtmlDraftDataUrl(htmlContent) }
+          })
+          return true
+        }
       })
     },
     [editor, shape.id]
@@ -3093,7 +3286,7 @@ function CowartHtmlDraftEmbed({ shape }) {
   }, [exitDomEditing, frameLoadVersion, htmlSource, isEditing, persistDomEdits, shape.id])
 
   return (
-    <HTMLContainer className="cowart-html-draft-container" id={shape.id}>
+    <HTMLContainer className={`cowart-html-draft-container${isCowartFilmShape(shape) ? ' cowart-film-container' : ''}`} id={shape.id}>
       {htmlSource ? (
         <iframe
           ref={handleIframeRef}
@@ -3107,7 +3300,8 @@ function CowartHtmlDraftEmbed({ shape }) {
           sandbox="allow-forms allow-popups allow-same-origin allow-scripts"
           srcDoc={htmlSource}
           tabIndex={isEditing ? 0 : -1}
-          title={AI_DRAFT_HOLDER_LABEL}
+          title={isCowartFilmShape(shape) ? AI_FILM_LABEL : AI_DRAFT_HOLDER_LABEL}
+          allow={isCowartFilmShape(shape) ? "autoplay" : undefined}
           width={toDomPrecision(shape.props.w)}
           style={{
             pointerEvents: isEditing ? 'auto' : 'none',
@@ -3124,6 +3318,9 @@ function CowartHtmlDraftEmbed({ shape }) {
         >
           <span>{loadError || 'HTML 草稿加载中'}</span>
         </div>
+      )}
+      {isCowartFilmShape(shape) && (
+        <CowartFilmPlaybackControls draftShapeId={shape.id} isEditing={isEditing} isLocked={shape.isLocked} />
       )}
     </HTMLContainer>
   )
@@ -3148,8 +3345,61 @@ const cowartShapeUtils = [CowartMindMapGeoShapeUtil, CowartFrameShapeUtil, Cowar
 const cowartUiOverrides = {
   actions(editor, actions, helpers) {
     const defaultDownloadOriginal = actions['download-original']
+    const defaultCopyAsPng = actions['copy-as-png']
     return {
       ...actions,
+      'copy-as-png': {
+        ...defaultCopyAsPng,
+        async onSelect(source) {
+          // Codex widgets run inside an iframe where the host can deny the browser Clipboard API.
+          // Render in the widget, then hand the PNG to the local MCP process for the native write.
+          if (!hasCowartWidgetBridge()) {
+            return defaultCopyAsPng.onSelect(source)
+          }
+
+          let shapeIds = editor.getSelectedShapeIds()
+          if (shapeIds.length === 0) {
+            shapeIds = Array.from(editor.getCurrentPageShapeIds())
+          }
+          if (shapeIds.length === 0) return
+
+          try {
+            const onlyShape = shapeIds.length === 1 ? editor.getShape(shapeIds[0]) : null
+            let image
+            if (isCowartHtmlDraftEmbedShape(onlyShape)) {
+              const bounds = new Box(
+                0,
+                0,
+                Number(onlyShape.props?.w) || 1,
+                Number(onlyShape.props?.h) || 1
+              )
+              image = await renderCowartHtmlDraftCanvas(
+                onlyShape,
+                getAnnotationEditExportPixelRatio(bounds)
+              )
+            } else {
+              image = await editor.toImageDataUrl(shapeIds, { format: 'png' })
+            }
+            const result = await copyCowartImageToClipboard({
+              dataUrl: image.url,
+              mimeType: 'image/png'
+            })
+            helpers.addToast({
+              title: 'PNG 已复制',
+              description: `${result.width} × ${result.height}，可直接粘贴到其他应用。`,
+              severity: 'success'
+            })
+          } catch (error) {
+            console.error(error)
+            helpers.addToast({
+              id: 'copy-fail',
+              title: '复制失败',
+              description: error instanceof Error ? error.message : '无法复制图像。',
+              severity: 'error'
+            })
+          }
+        }
+      },
       'download-original': {
         ...defaultDownloadOriginal,
         async onSelect(source) {
@@ -3186,6 +3436,7 @@ const cowartUiOverrides = {
     en: {
       'tool.ai-image': AI_IMAGE_HOLDER_LABEL,
       'tool.ai-draft': AI_DRAFT_HOLDER_LABEL,
+      'tool.ai-film': AI_FILM_LABEL,
       'tool.ai-slides': AI_SLIDES_LABEL,
       'tool.mind-map': MIND_MAP_TOOL_LABEL,
       'tool.cowart-annotation': ANNOTATION_TOOL_LABEL
@@ -3193,6 +3444,7 @@ const cowartUiOverrides = {
     'zh-cn': {
       'tool.ai-image': AI_IMAGE_HOLDER_LABEL,
       'tool.ai-draft': AI_DRAFT_HOLDER_LABEL,
+      'tool.ai-film': AI_FILM_LABEL,
       'tool.ai-slides': AI_SLIDES_LABEL,
       'tool.mind-map': MIND_MAP_TOOL_LABEL,
       'tool.cowart-annotation': ANNOTATION_TOOL_LABEL
@@ -3253,6 +3505,22 @@ const cowartUiOverrides = {
         meta: {
           cowartTool: 'ai-draft-holder'
         }
+      },
+      [AI_FILM_TOOL_ID]: {
+        id: AI_FILM_TOOL_ID,
+        label: 'tool.ai-film',
+        icon: aiFilmToolIcon,
+        onSelect() { createAiFilmHolderAtViewportCenter(editor) },
+        onDragStart(source, info) {
+          const scale = editor.getResizeScaleFactor()
+          onDragFromToolbarToCreateShape(editor, info, {
+            createShape: (id) => createAiFilmHolderShape(editor, id, {
+              props: { w: AI_DRAFT_HOLDER_DEFAULT_W * scale, h: AI_DRAFT_HOLDER_DEFAULT_H * scale }
+            }),
+            onDragEnd: (id) => editor.select(id)
+          })
+        },
+        meta: { cowartTool: 'ai-film-holder' }
       },
       [AI_SLIDES_TOOL_ID]: {
         id: AI_SLIDES_TOOL_ID,
@@ -3366,14 +3634,6 @@ function CowartSlidesMedia({ onUnhandledHtmlClick, shape, title }) {
         const assetSource = asset?.props?.src
         if (!asset || !assetSource) throw new Error('图片资源不可用')
 
-        if (assetSource.startsWith(PAGE_ASSETS_ROUTE) && hasCowartWidgetBridge()) {
-          const pageAsset = await readCowartPageAsset(assetSource)
-          return {
-            kind: 'image',
-            url: `data:${pageAsset.mimeType};base64,${pageAsset.dataBase64}`
-          }
-        }
-
         if (assetSource.startsWith('data:') || /^https?:\/\//.test(assetSource)) {
           return { kind: 'image', url: assetSource }
         }
@@ -3428,7 +3688,7 @@ function CowartSlidesMedia({ onUnhandledHtmlClick, shape, title }) {
     return () => {
       disposed = true
     }
-  }, [editor, shape.id, shape.props?.assetId, shape.props?.url, shape.meta?.cowartHtmlDraftAssetUrl])
+  }, [editor, shape.id, shape.props?.assetId, shape.props?.url, shape.meta?.cowartHtmlDraftAssetUrl, shape.meta?.cowartHtmlDraftContentHash])
 
   useEffect(
     () => () => {
@@ -3814,6 +4074,7 @@ function CowartAiImageGenerationPanel() {
     [editor]
   )
   const fileInputRef = useRef(null)
+  const submitInFlightRef = useRef(false)
   const [promptValue, setPromptValue] = useState('')
   const [referenceFiles, setReferenceFiles] = useState([])
   const [referencePreviews, setReferencePreviews] = useState([])
@@ -3901,13 +4162,14 @@ function CowartAiImageGenerationPanel() {
 
   async function handleSubmit(event) {
     event?.preventDefault()
-    if (!canSend || isSending) return
+    if (!canSend || isSending || submitInFlightRef.current) return
+    submitInFlightRef.current = true
 
     setStatus('sending')
     setErrorMessage('')
     try {
       await sendAiImageGenerationRequest({
-        holderShape: shape,
+        holderShape: editor.getShape(shape.id) || shape,
         userPrompt: promptValue,
         referenceFiles
       })
@@ -3918,14 +4180,13 @@ function CowartAiImageGenerationPanel() {
       console.error(error)
       setStatus('error')
       setErrorMessage(error instanceof Error ? error.message : '发送失败，请重试。')
+    } finally {
+      submitInFlightRef.current = false
     }
   }
 
   function handlePromptKeyDown(event) {
-    stopEditorOverlayEvent(event)
-    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-      handleSubmit(event)
-    }
+    handleGenerationPromptKeyDown(event, handleSubmit)
   }
 
   function handlePromptPaste(event) {
@@ -4055,7 +4316,7 @@ function CowartAiDraftGenerationPanel() {
       editor.getCamera()
       editor.getViewportScreenBounds()
 
-      const layout = getAiImageGenerationPanelLayout(editor, shape.id)
+      const layout = getAiImageGenerationPanelLayout(editor, shape.id, isAiFilmHolderShape(shape) ? 320 : undefined)
       if (!layout) return null
 
       return {
@@ -4066,6 +4327,7 @@ function CowartAiDraftGenerationPanel() {
     [editor]
   )
   const fileInputRef = useRef(null)
+  const submitInFlightRef = useRef(false)
   const [promptValue, setPromptValue] = useState('')
   const [referenceFiles, setReferenceFiles] = useState([])
   const [referencePreviews, setReferencePreviews] = useState([])
@@ -4075,7 +4337,11 @@ function CowartAiDraftGenerationPanel() {
   useEffect(() => {
     setStatus('idle')
     setErrorMessage('')
-  }, [selectedTarget?.shape.id])
+    const holder = selectedTarget ? editor.getShape(selectedTarget.shape.id) : null
+    if (isAiFilmHolderShape(holder) && holder.meta?.cowartFilmMuted === true) {
+      editor.updateShape({ id: holder.id, type: 'frame', meta: { ...holder.meta, cowartFilmMuted: false } })
+    }
+  }, [editor, selectedTarget?.shape.id])
 
   useEffect(() => {
     if (status !== 'sent') return undefined
@@ -4098,6 +4364,7 @@ function CowartAiDraftGenerationPanel() {
   if (!selectedTarget) return null
 
   const { shape, layout } = selectedTarget
+  const isFilm = isAiFilmHolderShape(shape)
   const canSend = promptValue.trim().length > 0 || referenceFiles.length > 0
   const isSending = status === 'sending'
 
@@ -4153,13 +4420,17 @@ function CowartAiDraftGenerationPanel() {
 
   async function handleSubmit(event) {
     event?.preventDefault()
-    if (!canSend || isSending) return
+    if (!canSend || isSending || submitInFlightRef.current) return
+    submitInFlightRef.current = true
 
     setStatus('sending')
     setErrorMessage('')
     try {
+      const saved = await saveCowartEditorSnapshot(editor)
+      if (saved?.ok === false) throw new Error(saved.message || '画布保存失败。')
+      await saveCowartSelectionState(getCowartSelectionSnapshot(editor))
       await sendAiDraftGenerationRequest({
-        holderShape: shape,
+        holderShape: editor.getShape(shape.id) || shape,
         userPrompt: promptValue,
         referenceFiles
       })
@@ -4170,14 +4441,13 @@ function CowartAiDraftGenerationPanel() {
       console.error(error)
       setStatus('error')
       setErrorMessage(error instanceof Error ? error.message : '发送失败，请重试。')
+    } finally {
+      submitInFlightRef.current = false
     }
   }
 
   function handlePromptKeyDown(event) {
-    stopEditorOverlayEvent(event)
-    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-      handleSubmit(event)
-    }
+    handleGenerationPromptKeyDown(event, handleSubmit)
   }
 
   function handlePromptPaste(event) {
@@ -4210,8 +4480,8 @@ function CowartAiDraftGenerationPanel() {
   return (
     <div className="cowart-ai-generation-overlay" aria-hidden={false}>
       <form
-        aria-label="AI HTML 生成"
-        className="cowart-ai-generation-panel"
+        aria-label={isFilm ? "AI 影片生成" : "AI HTML 生成"}
+        className={`cowart-ai-generation-panel${isFilm ? " cowart-ai-film-generation-panel" : ""}`}
         data-status={status}
         onClick={stopEditorOverlayEvent}
         onDoubleClick={stopEditorOverlayEvent}
@@ -4256,6 +4526,8 @@ function CowartAiDraftGenerationPanel() {
           />
         </div>
 
+        {isFilm && <CowartFilmGenerationOptions shape={shape} disabled={isSending} />}
+
         <textarea
           aria-label="自定义 prompt"
           className="cowart-ai-generation-prompt"
@@ -4269,21 +4541,24 @@ function CowartAiDraftGenerationPanel() {
           }}
           onKeyDown={handlePromptKeyDown}
           onPaste={handlePromptPaste}
-          placeholder="描述你想生成的 HTML"
+          placeholder={isFilm ? "描述影片内容、镜头和节奏，默认 15 秒" : "描述你想生成的 HTML"}
           rows={3}
           value={promptValue}
         />
 
         <div className="cowart-ai-generation-footer">
-          <div className="cowart-ai-generation-status" aria-live="polite">
-            {status === 'sending'
-              ? '正在发送'
-              : status === 'sent'
-                ? '已发送'
-                : errorMessage}
+          <div className="cowart-ai-generation-footer-start">
+            {isFilm && <CowartFilmGenerationOptions shape={shape} disabled={isSending} section="duration" />}
+            <div className="cowart-ai-generation-status" aria-live="polite">
+              {status === 'sending'
+                ? '正在发送'
+                : status === 'sent'
+                  ? '已发送'
+                  : errorMessage}
+            </div>
           </div>
           <button
-            aria-label="发送草稿请求"
+            aria-label={isFilm ? "发送影片生成请求" : "发送草稿请求"}
             className="cowart-ai-generation-send"
             disabled={!canSend || isSending}
             type="submit"
@@ -4293,6 +4568,39 @@ function CowartAiDraftGenerationPanel() {
         </div>
       </form>
     </div>
+  )
+}
+
+function CowartFilmGenerationOptions({ shape, disabled, section = 'style' }) {
+  const editor = useEditor()
+  const { style, duration } = getFilmOptions(shape)
+  function updateOptions(patch) {
+    const current = editor.getShape(shape.id)
+    if (!current || disabled) return
+    editor.markHistoryStoppingPoint('film-generation-options')
+    editor.updateShape({ id: shape.id, type: 'frame', meta: { ...current.meta, ...patch } })
+  }
+  if (section === 'duration') {
+    return (
+      <div className="cowart-film-options-row">
+        <label>时长
+          <input aria-label="影片时长（秒）" disabled={disabled} type="number" min="1" max="120" step="1"
+            defaultValue={duration} key={`${shape.id}-${duration}`}
+            onBlur={(event) => {
+              const value = Number(event.target.value)
+              const next = Number.isFinite(value) && value > 0 ? Math.min(120, Math.max(1, Math.round(value))) : duration
+              event.target.value = String(next)
+              updateOptions({ cowartFilmDuration: next })
+            }}
+            onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } }} />
+          秒
+        </label>
+      </div>
+    )
+  }
+  return (
+    <FilmStyleButtons styleId={style.id} disabled={disabled}
+      onChange={(styleId) => updateOptions({ cowartFilmStyle: styleId })} />
   )
 }
 
@@ -4313,6 +4621,7 @@ function CowartAiSlidesGenerationPanel() {
     [editor]
   )
   const fileInputRef = useRef(null)
+  const submitInFlightRef = useRef(false)
   const customPageCountInputRef = useRef(null)
   const pageCountMenuRef = useRef(null)
   const [promptValue, setPromptValue] = useState('')
@@ -4432,7 +4741,8 @@ function CowartAiSlidesGenerationPanel() {
 
   async function handleSubmit(event) {
     event?.preventDefault()
-    if (!canSend || isSending) return
+    if (!canSend || isSending || submitInFlightRef.current) return
+    submitInFlightRef.current = true
 
     setStatus('sending')
     setErrorMessage('')
@@ -4450,12 +4760,13 @@ function CowartAiSlidesGenerationPanel() {
       console.error(error)
       setStatus('error')
       setErrorMessage(error instanceof Error ? error.message : '发送失败，请重试。')
+    } finally {
+      submitInFlightRef.current = false
     }
   }
 
   function handlePromptKeyDown(event) {
-    stopEditorOverlayEvent(event)
-    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') handleSubmit(event)
+    handleGenerationPromptKeyDown(event, handleSubmit)
   }
 
   function handlePromptPaste(event) {
@@ -4612,6 +4923,14 @@ function CowartAiSlidesGenerationPanel() {
 }
 
 function CowartStylePanel(props) {
+  const editor = useEditor()
+  const isSelectTool = useValue(
+    'cowart style panel select tool',
+    () => editor.getCurrentToolId() === 'select',
+    [editor]
+  )
+  if (isSelectTool) return null
+
   return (
     <DefaultStylePanel {...props}>
       <DefaultStylePanelContent />
@@ -4666,7 +4985,7 @@ function CowartAiImageStyleControls() {
         id: selectedAiHolderShape.id,
         type: 'frame',
         meta: {
-          ...selectedAiHolderShape.meta,
+          ...editor.getShape(selectedAiHolderShape.id)?.meta,
           cowartAiAspectRatio: w / h
         },
         props: { w, h }
@@ -4682,7 +5001,7 @@ function CowartAiImageStyleControls() {
         id: selectedAiHolderShape.id,
         type: 'frame',
         meta: {
-          ...selectedAiHolderShape.meta,
+          ...editor.getShape(selectedAiHolderShape.id)?.meta,
           cowartAiAspectLocked: nextIsLocked,
           cowartAiAspectRatio: currentRatio
         }
@@ -4846,21 +5165,27 @@ function CowartSelectionToolbar() {
   }
 
   if (htmlDraftShapeId) {
-    return <CowartHtmlDraftToolbar draftShapeId={htmlDraftShapeId} />
+    return <CowartHtmlDraftToolbar key={htmlDraftShapeId} draftShapeId={htmlDraftShapeId} />
   }
 
   return <CowartImageToolbar />
 }
 
-function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targetKey }) {
+function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, onExportFilm, targetKey }) {
   const editor = useEditor()
   const menuRef = useRef(null)
   const [isOpen, setIsOpen] = useState(false)
   const [status, setStatus] = useState('idle')
+  const [progress, setProgress] = useState(null)
+  const [exportError, setExportError] = useState(null)
+  const exportAbortRef = useRef(null)
 
   useEffect(() => {
     setIsOpen(false)
     setStatus('idle')
+    setProgress(null)
+    setExportError(null)
+    return () => exportAbortRef.current?.abort()
   }, [targetKey])
 
   useEffect(() => {
@@ -4881,7 +5206,7 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
   }, [editor, isOpen])
 
   useEffect(() => {
-    if (status === 'idle' || status === 'sending') return undefined
+    if (status !== 'sent') return undefined
     const timer = window.setTimeout(() => setStatus('idle'), ANNOTATION_EDIT_STATUS_RESET_MS)
     return () => window.clearTimeout(timer)
   }, [status])
@@ -4890,21 +5215,30 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
     if (disabled || status === 'sending') return
     setIsOpen(false)
     setStatus('sending')
+    setProgress(null)
+    setExportError(null)
+    const controller = new AbortController()
+    exportAbortRef.current = controller
     try {
-      await exporter()
+      await exporter(setProgress, controller.signal)
+      if (controller.signal.aborted) return
       setStatus('sent')
     } catch (error) {
+      if (controller.signal.aborted) return
       console.error(error)
+      setExportError(error instanceof Error ? error.message : '导出失败，请重试')
       setStatus('error')
+    } finally {
+      if (exportAbortRef.current === controller) exportAbortRef.current = null
     }
   }
 
   const title = status === 'sending'
-    ? '正在导出'
+    ? progress === null ? '正在导出' : `正在渲染影片 ${Math.round(progress * 100)}%`
     : status === 'sent'
       ? '导出完成'
       : status === 'error'
-        ? '导出失败，请重试'
+        ? exportError || '导出失败，请重试'
         : COWART_EXPORT_LABEL
 
   return (
@@ -4926,12 +5260,19 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
         ) : (
           <Download aria-hidden="true" size={16} strokeWidth={2} />
         )}
-        <span className="cowart-slides-toolbar-label">{COWART_EXPORT_LABEL}</span>
+        <span className="cowart-slides-toolbar-label">{status === 'sending' ? title : COWART_EXPORT_LABEL}</span>
         <ChevronDown aria-hidden="true" className="cowart-export-chevron" size={13} strokeWidth={2} />
       </TldrawUiToolbarButton>
       {isOpen && (
         <div aria-label="导出格式" className="cowart-ai-slides-page-count-popover cowart-export-popover" role="menu">
-          <button
+          {onExportFilm && <button
+            className="cowart-ai-slides-page-count-option"
+            onClick={() => handleExport(onExportFilm)} role="menuitem" type="button"
+          >
+            <Film aria-hidden="true" className="is-visible" size={14} strokeWidth={2} />
+            <span>导出为影片</span>
+          </button>}
+          {onExportImage && <button
             className="cowart-ai-slides-page-count-option"
             onClick={() => handleExport(onExportImage)}
             role="menuitem"
@@ -4939,7 +5280,7 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
           >
             <ImageIcon aria-hidden="true" className="is-visible" size={14} strokeWidth={2} />
             <span>{COWART_EXPORT_IMAGE_LABEL}</span>
-          </button>
+          </button>}
           <button
             className="cowart-ai-slides-page-count-option"
             onClick={() => handleExport(onExportHtml)}
@@ -4951,6 +5292,7 @@ function CowartExportMenu({ disabled = false, onExportHtml, onExportImage, targe
           </button>
         </div>
       )}
+      {status === 'error' && exportError && <div className="cowart-export-error" role="alert">{exportError}</div>}
     </div>
   )
 }
@@ -5065,6 +5407,7 @@ function CowartSlidesAnnotationEditButton({ slidesShapeId }) {
 
 function CowartHtmlDraftToolbar({ draftShapeId }) {
   const editor = useEditor()
+  const isFilm = useValue('cowart selected film', () => isCowartFilmShape(editor.getShape(draftShapeId)), [editor, draftShapeId])
   const showToolbar = useValue(
     'cowart show html draft toolbar',
     () => editor.isInAny('select.idle', 'select.pointing_shape', 'select.editing_shape'),
@@ -5092,17 +5435,21 @@ function CowartHtmlDraftToolbar({ draftShapeId }) {
     <TldrawUiContextualToolbar
       className="tlui-media__toolbar tlui-image__toolbar cowart-html-draft__toolbar"
       getSelectionBounds={getSelectionBounds}
-      label="AI HTML 工具栏"
+      label={isFilm ? "AI 影片工具栏" : "AI HTML 工具栏"}
     >
       {!isDomEditing && (
         <CowartExportMenu
-          onExportHtml={() => exportCowartHtmlDraft(editor, draftShapeId, 'html')}
-          onExportImage={() => exportCowartHtmlDraft(editor, draftShapeId, 'image')}
+          onExportHtml={(_onProgress, signal) => isFilm
+            ? withFilmExportAnalytics(() => exportCowartHtmlDraft(editor, draftShapeId, 'html'),
+              { ...filmAnalyticsContext(editor.getShape(draftShapeId)), format: 'html' }, trackFilmExport, signal)
+            : exportCowartHtmlDraft(editor, draftShapeId, 'html')}
+          onExportFilm={isFilm ? (onProgress, signal) => exportCowartFilm(editor, draftShapeId, onProgress, signal) : undefined}
+          onExportImage={isFilm ? undefined : () => exportCowartHtmlDraft(editor, draftShapeId, 'image')}
           targetKey={`html-${draftShapeId}`}
         />
       )}
       <CowartHtmlDraftDomEditButton draftShapeId={draftShapeId} isEditing={isDomEditing} />
-      {!isDomEditing && (
+      {!isDomEditing && !isFilm && (
         <>
           <CowartHtmlDraftToolbarButton
             action="edit"
@@ -5125,6 +5472,78 @@ function CowartHtmlDraftToolbar({ draftShapeId }) {
   )
 }
 
+function CowartFilmPlaybackControls({ draftShapeId, isEditing, isLocked = false }) {
+  const editor = useEditor()
+  const seekChangedRef = useRef(false)
+  const [status, setStatus] = useState(() => cowartFilmStatuses.get(draftShapeId) || {
+    ...getFilmOptions(editor.getShape(draftShapeId)), currentTime: 0, playing: false, ready: false
+  })
+  useEffect(() => {
+    function receive(event) {
+      if (event.detail?.shapeId === draftShapeId) setStatus(event.detail.status)
+    }
+    window.addEventListener(COWART_FILM_STATUS_EVENT, receive)
+    const current = cowartFilmStatuses.get(draftShapeId)
+    if (current) setStatus(current)
+    return () => window.removeEventListener(COWART_FILM_STATUS_EVENT, receive)
+  }, [draftShapeId])
+  useEffect(() => {
+    if (isEditing) cowartFilmControllers.get(draftShapeId)?.command('pause')
+  }, [draftShapeId, isEditing])
+  function command(name, value) {
+    const controller = cowartFilmControllers.get(draftShapeId)
+    if (!controller) return
+    controller.command(name, value)
+    if (name !== 'seek') {
+      trackFilmPlaybackAction({
+        ...filmAnalyticsContext(editor.getShape(draftShapeId)),
+        action: name,
+        ...(name === 'mute' ? { filmMuted: value } : {})
+      })
+    }
+    if (name === 'mute') {
+      const shape = editor.getShape(draftShapeId)
+      if (shape && shape.meta?.cowartFilmMuted !== value) {
+        editor.markHistoryStoppingPoint('toggle-film-mute')
+        editor.updateShape({ id: shape.id, type: 'embed', meta: { ...shape.meta, cowartFilmMuted: value } })
+      }
+    }
+  }
+  function trackSeek() {
+    if (!seekChangedRef.current) return
+    seekChangedRef.current = false
+    trackFilmPlaybackAction({ ...filmAnalyticsContext(editor.getShape(draftShapeId)), action: 'seek' })
+  }
+  function formatTime(value) {
+    const seconds = Math.floor(Number(value) || 0)
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+  }
+  return (
+    <div className="cowart-film-playback" onPointerDown={stopEditorOverlayEvent} onKeyDown={stopEditorOverlayEvent}>
+      <button aria-label={status.playing ? '暂停影片' : '播放影片'} title={status.error || (status.playing ? '暂停影片' : '播放影片')}
+        disabled={!status.ready || isEditing || isLocked} onClick={() => command(status.playing ? 'pause' : 'play')} type="button">
+        {status.playing ? <Pause size={18} /> : <Play size={18} />}
+      </button>
+      <input aria-label="影片进度" className="cowart-film-progress" type="range" min="0" max={status.duration || 15}
+        step="any" value={status.currentTime || 0} disabled={!status.ready || isEditing || isLocked}
+        onChange={(event) => { seekChangedRef.current = true; command('seek', Number(event.target.value)) }}
+        onPointerUp={trackSeek}
+        onBlur={trackSeek}
+        onKeyUp={(event) => {
+          if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
+            trackSeek()
+          }
+        }} />
+      <span className="cowart-film-time">{formatTime(status.currentTime)} / {formatTime(status.duration)}</span>
+      <button aria-label={status.muted ? '取消静音' : '静音影片'} aria-pressed={status.muted} disabled={!status.ready || isEditing || isLocked}
+        onClick={() => command('mute', !status.muted)} type="button">
+        {status.muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+      </button>
+      {status.error && <span className="cowart-film-playback-error" role="status">{status.error}</span>}
+    </div>
+  )
+}
+
 function CowartHtmlDraftDomEditButton({ draftShapeId, isEditing }) {
   const editor = useEditor()
   const [status, setStatus] = useState('idle')
@@ -5137,6 +5556,7 @@ function CowartHtmlDraftDomEditButton({ draftShapeId, isEditing }) {
   async function handleClick() {
     if (status === 'saving') return
     if (!isEditing) {
+      cowartFilmControllers.get(draftShapeId)?.command('pause')
       editor.setEditingShape(draftShapeId)
       editor.setCurrentTool('select.editing_shape')
       window.requestAnimationFrame(() => cowartHtmlDraftIframes.get(draftShapeId)?.focus())
@@ -5395,6 +5815,7 @@ function CowartAltTextEditor({ shapeId, onClose }) {
 
 function CowartAnnotationEditToolbarButton({ imageShapeId }) {
   const editor = useEditor()
+  const { addToast } = useToasts()
   const [status, setStatus] = useState('idle')
 
   useEffect(() => {
@@ -5406,9 +5827,29 @@ function CowartAnnotationEditToolbarButton({ imageShapeId }) {
   async function handleClick() {
     if (status === 'sending') return
 
+    let request
+    try {
+      request = prepareAnnotationEditRequest(editor, imageShapeId)
+    } catch (error) {
+      console.error(error)
+      setStatus('error')
+      return
+    }
+
+    if (isAnnotationEditExportTooLarge(request.exportSize)) {
+      const { width, height } = request.exportSize
+      addToast({
+        id: 'annotation-edit-image-too-large',
+        title: '当前图片尺寸太大，暂不支持',
+        description: `图片与标注的导出尺寸为 ${width} × ${height}。请将图片缩小到长边不超过 ${ANNOTATION_EDIT_MAX_EXPORT_DIMENSION}px、总像素不超过 1600 万，或将图片外的标注移近后重试。`,
+        severity: 'error'
+      })
+      return
+    }
+
     setStatus('sending')
     try {
-      await sendAnnotationEditRequest(editor, imageShapeId)
+      await sendAnnotationEditRequest(editor, imageShapeId, request)
       setStatus('sent')
     } catch (error) {
       console.error(error)
@@ -5558,13 +5999,14 @@ function CowartToolbarDivider() {
 
 function CowartToolbar(props) {
   return (
-    <DefaultToolbar {...props} maxItems={12}>
+    <CowartDraggableToolbar {...props} maxItems={12}>
       <CowartAnnotationToolbarItem />
       <CowartToolbarDivider />
       <SelectToolbarItem />
       <HandToolbarItem />
       <CowartToolbarItem toolId={AI_IMAGE_TOOL_ID} />
       <CowartToolbarItem toolId={AI_DRAFT_TOOL_ID} />
+      <CowartToolbarItem toolId={AI_FILM_TOOL_ID} />
       <CowartToolbarItem toolId={AI_SLIDES_TOOL_ID} />
       <CowartToolbarItem toolId={MIND_MAP_TOOL_ID} />
       <CowartToolbarDivider />
@@ -5594,7 +6036,7 @@ function CowartToolbar(props) {
       <HighlightToolbarItem />
       <LaserToolbarItem />
       <FrameToolbarItem />
-    </DefaultToolbar>
+    </CowartDraggableToolbar>
   )
 }
 
@@ -5613,6 +6055,8 @@ function getCowartSelection(editor) {
       meta: shape?.meta ?? null,
       isAiImageHolder: shape?.meta?.cowartAiImageHolder === true,
       isAiDraftHolder: shape?.meta?.cowartAiDraftHolder === true,
+      isAiFilmHolder: isAiFilmHolderShape(shape),
+      isFilm: isCowartFilmShape(shape),
       isAiSlides: shape?.meta?.cowartAiSlides === true,
       isHtmlDraft: isCowartHtmlDraftEmbedShape(shape),
       props: shape?.props ?? null,
@@ -5636,6 +6080,19 @@ function getCowartSelectionSnapshot(editor) {
   return {
     selectedShapes: getCowartSelection(editor)
   }
+}
+
+function getCowartSelectionRecords(editor) {
+  return editor.getSelectedShapeIds().map((id) => {
+    const shape = editor.getShape(id)
+    return [id, shape, shape?.props?.assetId ? editor.getAsset(shape.props.assetId) : null]
+  })
+}
+
+function cowartSelectionRecordsEqual(left, right) {
+  return Boolean(left && right && left.length === right.length && left.every((records, index) =>
+    records.every((record, recordIndex) => record === right[index][recordIndex])
+  ))
 }
 
 function getCowartViewState(editor) {
@@ -5690,7 +6147,6 @@ export default function App() {
   const [snapshot, setSnapshot] = useState()
   const [viewState, setViewState] = useState()
   const [loadError, setLoadError] = useState(null)
-  const [skippedRecords, setSkippedRecords] = useState([])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -5699,11 +6155,14 @@ export default function App() {
       try {
         const canvasState = await loadCowartCanvasState(controller.signal)
         const sanitized = sanitizeCanvasSnapshotForTldraw(canvasState.snapshot)
+        if (canvasState.snapshot !== null && !sanitized.snapshot) {
+          throw new Error('Cowart could not load the saved canvas snapshot.')
+        }
         setSnapshot(sanitized.snapshot)
-        setSkippedRecords(sanitized.skippedRecords)
         setViewState(canvasState.viewState ?? null)
       } catch (error) {
         if (error.name === 'AbortError') return
+        reportCowartStartup('canvas_load_failed')
         setLoadError(error)
         setSnapshot(null)
         setViewState(null)
@@ -5716,11 +6175,19 @@ export default function App() {
   }, [])
 
   const handleMount = useCallback((editor) => {
+    reportCowartStartup('canvas_mounted')
+    trackCanvasOpened()
     window.__cowartEditor = editor
     window.__cowartSelection = () => getCowartSelection(editor)
     window.__cowartViewState = () => getCowartViewState(editor)
     const disposeMindMapLifecycle = installMindMapLifecycle(editor)
+    let isDisposed = false
+    const canvasSaveSession = attachCowartCanvasSaveSession(editor)
+    let lastWrittenSelectionState = ''
     let lastSyncedSelectionState = ''
+    let lastSelectionRecords = null
+    let selectionSnapshot = null
+    let selectionState = ''
     let isSelectionStateSaving = false
     let hasPendingSelectionState = false
     let lastSyncedViewState = ''
@@ -5732,12 +6199,19 @@ export default function App() {
     })
 
     async function syncSelectionState() {
-      const selectionSnapshot = getCowartSelectionSnapshot(editor)
-      writeCowartSelectionState(selectionSnapshot)
-
-      const selectionState = JSON.stringify(selectionSnapshot)
+      const selectionRecords = getCowartSelectionRecords(editor)
+      if (!cowartSelectionRecordsEqual(selectionRecords, lastSelectionRecords)) {
+        // Store records are immutable. Idle ticks can compare identities without
+        // serializing selected inline HTML or image payloads four times a second.
+        lastSelectionRecords = selectionRecords
+        selectionSnapshot = getCowartSelectionSnapshot(editor)
+        selectionState = JSON.stringify(selectionSnapshot)
+      }
+      if (selectionState !== lastWrittenSelectionState) {
+        writeCowartSelectionState(selectionSnapshot)
+        lastWrittenSelectionState = selectionState
+      }
       if (selectionState === lastSyncedSelectionState) return
-      lastSyncedSelectionState = selectionState
 
       if (isSelectionStateSaving) {
         hasPendingSelectionState = true
@@ -5746,10 +6220,12 @@ export default function App() {
 
       isSelectionStateSaving = true
       try {
+        const savingSelectionState = selectionState
         await saveCowartSelectionState({
           ...selectionSnapshot,
           updatedAt: new Date().toISOString()
         })
+        lastSyncedSelectionState = savingSelectionState
       } catch (error) {
         console.error(error)
       } finally {
@@ -5765,14 +6241,9 @@ export default function App() {
     const selectionStateTimer = window.setInterval(syncSelectionState, 250)
 
     async function syncViewState() {
-      const viewStateSnapshot = {
-        ...getCowartViewState(editor),
-        updatedAt: new Date().toISOString()
-      }
-
+      const viewStateSnapshot = getCowartViewState(editor)
       const nextViewState = JSON.stringify(viewStateSnapshot)
       if (nextViewState === lastSyncedViewState) return
-      lastSyncedViewState = nextViewState
 
       if (isViewStateSaving) {
         hasPendingViewState = true
@@ -5781,7 +6252,11 @@ export default function App() {
 
       isViewStateSaving = true
       try {
-        await saveCowartViewState(viewStateSnapshot)
+        await saveCowartViewState({
+          ...viewStateSnapshot,
+          updatedAt: new Date().toISOString()
+        })
+        lastSyncedViewState = nextViewState
       } catch (error) {
         console.error(error)
       } finally {
@@ -5843,12 +6318,112 @@ export default function App() {
     let hasPendingSave = false
     let hasUnsavedChanges = false
     let documentChangeVersion = 0
+    let saveConflict = false
+    let conflictNotice = null
+    let conflictBackupVersion = null
+    let conflictBackupStore = null
+    let conflictReloadButton = null
     let isSyncingAnnotationShape = false
     let remoteLoadController = null
-    const acknowledgedImageShapeDeletes = new Set()
+    let lastAppliedRemoteSnapshot = null
+
+    function showSaveConflict() {
+      if (conflictNotice || isDisposed) return
+      const notice = containerDocument.createElement('div')
+      notice.setAttribute('role', 'alert')
+      notice.setAttribute('data-cowart-save-conflict', '')
+      Object.assign(notice.style, {
+        position: 'fixed', top: '12px', left: '50%', transform: 'translateX(-50%)',
+        zIndex: '100000', maxWidth: 'calc(100% - 32px)', padding: '12px', borderRadius: '8px',
+        background: '#fff7ed', color: '#7c2d12', border: '1px solid #fdba74', boxShadow: '0 2px 12px #0002'
+      })
+      const message = containerDocument.createElement('div')
+      message.textContent = '画布已被其他操作更新，当前修改尚未保存。请先备份，再加载最新画布。'
+      const backup = containerDocument.createElement('button')
+      backup.type = 'button'
+      backup.textContent = '备份当前修改'
+      const reload = containerDocument.createElement('button')
+      reload.type = 'button'
+      reload.textContent = '加载最新画布'
+      reload.disabled = true
+      conflictReloadButton = reload
+      backup.addEventListener('click', async () => {
+        backup.disabled = true
+        const backupVersion = documentChangeVersion
+        try {
+          const json = JSON.stringify(editor.store.getStoreSnapshot(), null, 2)
+          const backupStore = JSON.parse(json).store
+          const downloaded = await downloadCowartFile({
+            fileName: `cowart-unsaved-${Date.now()}.json`,
+            mimeType: 'application/json',
+            dataUrl: `data:application/json;charset=utf-8,${encodeURIComponent(json)}`
+          })
+          if (!downloaded?.ok) throw new Error('备份未保存，请重试。')
+          if (isDisposed) return
+          conflictBackupVersion = backupVersion
+          conflictBackupStore = backupStore
+          // Store listeners flush on the next frame. Check the document itself
+          // as well, so edits made while the download is pending need a backup.
+          reload.disabled = documentChangeVersion !== backupVersion || storeChangedSinceSnapshot(editor, backupStore)
+          message.textContent = reload.disabled
+            ? '备份已保存；画布又有新修改，请再次备份后加载最新画布。'
+            : '备份已保存到下载目录。现在可以加载最新画布。'
+        } catch (error) {
+          if (!isDisposed) message.textContent = `备份失败，当前修改仍保留在画布中：${error.message}`
+        } finally { backup.disabled = false }
+      })
+      reload.addEventListener('click', async () => {
+        if (
+          conflictBackupVersion !== documentChangeVersion ||
+          !conflictBackupStore ||
+          storeChangedSinceSnapshot(editor, conflictBackupStore)
+        ) {
+          reload.disabled = true
+          message.textContent = '画布又有新修改，请再次备份后加载最新画布。'
+          return
+        }
+        reload.disabled = true
+        const replacingVersion = documentChangeVersion
+        const replacingStore = conflictBackupStore
+        try {
+          const nextSnapshot = await refreshCowartCanvasSnapshot()
+          if (isDisposed) return
+          if (documentChangeVersion !== replacingVersion || storeChangedSinceSnapshot(editor, replacingStore)) {
+            message.textContent = '画布又有新修改，请再次备份后加载最新画布。'
+            return
+          }
+          const sanitized = sanitizeCanvasSnapshotForTldraw(nextSnapshot)
+          if (!sanitized.snapshot || sanitized.skippedRecords.length) throw new Error('最新画布暂时无法完整加载，请稍后重试。')
+          editor.store.mergeRemoteChanges(() => {
+            editor.store.loadStoreSnapshot(sanitized.snapshot)
+            editor.store.ensureStoreIsUsable()
+          })
+          // Recovery replaces the whole document. Undo entries from the local
+          // version must not be replayed against the newly accepted revision.
+          editor.clearHistory()
+          acceptCowartCanvasSnapshot(nextSnapshot)
+          lastAppliedRemoteSnapshot = nextSnapshot
+          hasUnsavedChanges = false
+          hasPendingSave = false
+          canvasSaveSession.reset()
+          saveConflict = false
+          conflictNotice?.remove()
+          conflictNotice = null
+          conflictReloadButton = null
+        } catch (error) {
+          if (!isDisposed) {
+            message.textContent = `加载失败，当前修改仍保留在画布中：${error.message}`
+            reload.disabled = conflictBackupVersion !== documentChangeVersion || storeChangedSinceSnapshot(editor, conflictBackupStore)
+          }
+        }
+      })
+      notice.append(message, backup, reload)
+      containerDocument.body.appendChild(notice)
+      conflictNotice = notice
+    }
 
     async function saveCanvas() {
-      if (!hasUnsavedChanges) return
+      if (!hasUnsavedChanges || saveConflict) return
 
       if (isSaving) {
         hasPendingSave = true
@@ -5857,24 +6432,22 @@ export default function App() {
 
       isSaving = true
       const savingVersion = documentChangeVersion
-      const acknowledgedDeletesInSave = new Set(acknowledgedImageShapeDeletes)
       try {
-        const saveResult = await saveCowartCanvasSnapshot(editor.store.getStoreSnapshot(), {
-          protectImageRecords: true,
-          acknowledgedImageShapeDeletes: Array.from(acknowledgedImageShapeDeletes)
-        })
+        const saveResult = await canvasSaveSession.save()
         if (saveResult?.ok === false) {
           throw new Error(saveResult.message || 'Cowart refused to save the canvas snapshot.')
-        }
-        for (const imageShapeId of acknowledgedDeletesInSave) {
-          acknowledgedImageShapeDeletes.delete(imageShapeId)
         }
         hasUnsavedChanges = documentChangeVersion !== savingVersion
       } catch (error) {
         console.error(error)
+        if (error.storage === 'revision-conflict') {
+          saveConflict = true
+          remoteLoadController?.abort()
+          showSaveConflict()
+        }
       } finally {
         isSaving = false
-        if (hasPendingSave || hasUnsavedChanges) {
+        if (!saveConflict && (hasPendingSave || hasUnsavedChanges)) {
           hasPendingSave = false
           scheduleSave()
         }
@@ -5884,14 +6457,18 @@ export default function App() {
     function scheduleSave() {
       documentChangeVersion += 1
       hasUnsavedChanges = true
+      if (conflictReloadButton) conflictReloadButton.disabled = true
       window.clearTimeout(saveTimer)
       window.clearTimeout(slidesLayoutTimer)
+      if (saveConflict) return
       if (isSaving) hasPendingSave = true
       saveTimer = window.setTimeout(saveCanvas, 500)
     }
 
     async function loadRemoteCanvasSnapshot() {
-      remoteLoadController?.abort()
+      // An MCP call can outlive the polling interval. Keep one request in flight
+      // instead of abandoning it and accumulating work in the host bridge.
+      if (isDisposed || saveConflict || remoteLoadController) return
       const controller = new AbortController()
       remoteLoadController = controller
 
@@ -5900,24 +6477,17 @@ export default function App() {
 
       try {
         const nextSnapshot = await refreshCowartCanvasSnapshot(controller.signal)
+        if (isDisposed || controller.signal.aborted) return
+        if (nextSnapshot === lastAppliedRemoteSnapshot) return
         const effectivePreserve =
           preserveLocalChanges || (preFetchStore && storeChangedSinceSnapshot(editor, preFetchStore))
-        const { changedRecords, skippedRecords: nextSkippedRecords } = applyRemoteCanvasSnapshot(
-          editor,
-          nextSnapshot,
-          {
-            preserveLocalChanges: effectivePreserve
-          }
-        )
-        setSkippedRecords(nextSkippedRecords)
-
-        if (changedRecords > 0 && effectivePreserve) {
-          hasUnsavedChanges = true
-          if (isSaving) {
-            hasPendingSave = true
-          } else {
-            scheduleSave()
-          }
+        // The client retains the latest remote response until local edits are
+        // saved. Reconciliation cannot apply it while those edits are pending.
+        if (effectivePreserve) return
+        const result = applyRemoteCanvasSnapshot(editor, nextSnapshot)
+        if (!result.skippedRecords?.length) {
+          acceptCowartCanvasSnapshot(nextSnapshot)
+          lastAppliedRemoteSnapshot = nextSnapshot
         }
       } catch (error) {
         if (error.name === 'AbortError') return
@@ -5930,16 +6500,19 @@ export default function App() {
     }
 
     const unsubscribe = editor.store.listen(
-      ({ changes }) => {
-        for (const imageShapeId of collectRemovedImageShapeIds(changes)) {
-          acknowledgedImageShapeDeletes.add(imageShapeId)
-        }
-        scheduleSave()
-      },
+      scheduleSave,
       {
         source: 'user',
         scope: 'document'
       }
+    )
+
+    retainCowartEditorAssets(editor)
+    const unsubscribeAssetCache = editor.store.listen(
+      ({ changes }) => {
+        if (cowartAssetReferencesChanged(changes)) retainCowartEditorAssets(editor)
+      },
+      { source: 'all', scope: 'all' }
     )
 
     let canvasEvents = null
@@ -6019,11 +6592,14 @@ export default function App() {
     )
 
     return () => {
+      isDisposed = true
       window.clearTimeout(saveTimer)
+      window.clearTimeout(slidesLayoutTimer)
       window.clearInterval(selectionStateTimer)
       window.clearInterval(viewStateTimer)
       window.clearInterval(canvasRefreshTimer)
       remoteLoadController?.abort()
+      conflictNotice?.remove()
       canvasEvents?.close()
       if (window.__cowartEditor === editor) {
         delete window.__cowartEditor
@@ -6032,6 +6608,8 @@ export default function App() {
       }
       document.getElementById(SELECTION_STATE_ELEMENT_ID)?.remove()
       unsubscribe()
+      unsubscribeAssetCache()
+      revokeCowartAssetObjectUrls()
       unsubscribeAnnotationEditingToolLock()
       unsubscribeAnnotationShapeSync()
       editor.off('event', handleSlidesPointerUp)
@@ -6041,6 +6619,7 @@ export default function App() {
       disposeMindMapLifecycle()
       syncViewState()
       saveCanvas()
+      canvasSaveSession.dispose()
     }
   }, [viewState])
 
@@ -6062,7 +6641,6 @@ export default function App() {
 
   return (
     <main className="cowart-canvas" aria-label="Cowart infinite canvas">
-      <SkippedRecordsNotice records={skippedRecords} />
       <Tldraw
         snapshot={snapshot ?? undefined}
         assetUrls={cowartAssetUrls}
@@ -6077,55 +6655,5 @@ export default function App() {
         tools={[CowartAnnotationTool]}
       />
     </main>
-  )
-}
-
-function SkippedRecordsNotice({ records }) {
-  const [isVisible, setIsVisible] = useState(false)
-  const [isDetailsOpen, setIsDetailsOpen] = useState(false)
-  const recordsKey = records
-    .map((record) => `${record.id}:${record.typeName ?? ''}:${record.type ?? ''}:${record.reason}`)
-    .join('\n')
-
-  useEffect(() => {
-    if (!records.length) {
-      setIsVisible(false)
-      setIsDetailsOpen(false)
-      return
-    }
-
-    setIsVisible(true)
-    setIsDetailsOpen(false)
-  }, [records.length, recordsKey])
-
-  useEffect(() => {
-    if (!records.length || !isVisible || isDetailsOpen) return undefined
-
-    const noticeTimer = window.setTimeout(() => {
-      setIsVisible(false)
-    }, SKIPPED_RECORDS_NOTICE_AUTO_HIDE_MS)
-
-    return () => window.clearTimeout(noticeTimer)
-  }, [records.length, recordsKey, isVisible, isDetailsOpen])
-
-  if (!records.length || !isVisible) return null
-
-  return (
-    <aside className="cowart-skipped-records" aria-live="polite">
-      <strong>Skipped {records.length} invalid canvas record{records.length === 1 ? '' : 's'}.</strong>
-      <span>Valid content was loaded.</span>
-      <details open={isDetailsOpen} onToggle={(event) => setIsDetailsOpen(event.currentTarget.open)}>
-        <summary>Details</summary>
-        <ul>
-          {records.slice(0, 8).map((record, index) => (
-            <li key={`${record.id}:${index}`}>
-              <code>{record.id}</code>
-              {record.typeName ? ` ${record.typeName}` : ''}
-              {record.type ? `/${record.type}` : ''}: {record.reason}
-            </li>
-          ))}
-        </ul>
-      </details>
-    </aside>
   )
 }

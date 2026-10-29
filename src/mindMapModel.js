@@ -165,10 +165,19 @@ export function getMindMapPresetEdgeProps(presetId, depth, branchColor = 'blue')
   }
 }
 
-export function createMindMapTopicAtomically(editor, nodeShape, edgeShape, bindings, rootUpdate = null) {
+export function createMindMapTopicAtomically(
+  editor,
+  nodeShape,
+  edgeShape,
+  bindings,
+  rootUpdate = null,
+  containerId = null
+) {
+  const nodeRecord = containerId ? { ...nodeShape, parentId: containerId } : nodeShape
+  const edgeRecord = containerId ? { ...edgeShape, parentId: containerId } : edgeShape
   editor.store.atomic(() => {
-    editor.createShape(nodeShape)
-    editor.createShape(edgeShape)
+    editor.createShape(nodeRecord)
+    editor.createShape(edgeRecord)
     editor.createBindings(bindings)
     editor.updateShape({ id: edgeShape.id, type: edgeShape.type, isLocked: true })
     if (rootUpdate) editor.updateShape(rootUpdate)
@@ -223,6 +232,7 @@ export function buildMindMapGraph({ shapes = [], bindings = [] } = {}) {
   const edgeByChild = new Map()
   const relationByEdge = new Map()
   const invalidEdgeIds = []
+  const incompleteEdgeIds = []
 
   for (const edge of edgeById.values()) {
     const edgeBindings = bindingsByEdge.get(edge.id) ?? []
@@ -231,16 +241,19 @@ export function buildMindMapGraph({ shapes = [], bindings = [] } = {}) {
     const parentId = startBinding?.toId
     const childId = endBinding?.toId
 
-    if (
+    const isIncomplete =
       !parentId ||
       !childId ||
-      parentId === childId ||
       !nodeById.has(parentId) ||
-      !nodeById.has(childId) ||
+      !nodeById.has(childId)
+    if (
+      isIncomplete ||
+      parentId === childId ||
       parentByChild.has(childId) ||
       wouldCreateCycle(parentByChild, parentId, childId)
     ) {
       invalidEdgeIds.push(edge.id)
+      if (isIncomplete) incompleteEdgeIds.push(edge.id)
       continue
     }
 
@@ -270,8 +283,36 @@ export function buildMindMapGraph({ shapes = [], bindings = [] } = {}) {
     edgeByChild,
     relationByEdge,
     rootIds,
-    invalidEdgeIds
+    invalidEdgeIds,
+    incompleteEdgeIds
   }
+}
+
+export function createMindMapInvalidEdgeRepairs(graph) {
+  const incompleteEdgeIds = new Set(graph.incompleteEdgeIds)
+  const deleteShapeIds = []
+  const updates = []
+
+  for (const edgeId of graph.invalidEdgeIds) {
+    const edge = graph.edgeById.get(edgeId)
+    if (!edge) continue
+    if (incompleteEdgeIds.has(edgeId)) {
+      deleteShapeIds.push(edgeId)
+      continue
+    }
+    updates.push({
+      id: edge.id,
+      type: edge.type,
+      isLocked: false,
+      meta: {
+        ...edge.meta,
+        [MIND_MAP_EDGE_META_KEY]: false,
+        cowartMindMapHidden: false
+      }
+    })
+  }
+
+  return { deleteShapeIds, updates }
 }
 
 export function getMindMapDescendantIds(graph, nodeId) {

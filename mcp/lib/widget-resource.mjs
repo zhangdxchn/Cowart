@@ -1,30 +1,22 @@
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import path from "node:path";
-
 import {
   RESOURCE_MIME_TYPE,
   registerAppResource,
 } from "@modelcontextprotocol/ext-apps/server";
-
-const require = createRequire(import.meta.url);
-let cachedMcpAppsGlobalScript = "";
-
-export function readText(...parts) {
-  return readFileSync(path.join(...parts), "utf8");
-}
+import { MCP_APPS_GLOBAL_SCRIPT } from "../generated/mcp-apps-global-script.mjs";
+import { installCowartStartupDiagnostics } from "../../src/widgetStartup.js";
 
 export function inlineWidget({
   html,
   css = "",
   js = "",
+  appVersion,
   initialDisplayMode = "",
   cssPlaceholder = "/* __COWART_WIDGET_CSS__ */",
   jsPlaceholder = "/* __COWART_WIDGET_JS__ */",
 }) {
   return injectMcpHostBridge(
     html.replace(cssPlaceholder, () => css).replace(jsPlaceholder, () => js),
-    { initialDisplayMode },
+    { appVersion, initialDisplayMode },
   );
 }
 
@@ -62,6 +54,10 @@ export function registerWidgetResource(
     "openai/widgetDescription": description,
     "openai/widgetPrefersBorder": prefersBorder,
     "openai/widgetCSP": openAiCsp,
+    "openai/ui": {
+      availableDisplayModes: ["fullscreen"],
+      preferredDisplayMode: "fullscreen",
+    },
   };
 
   registerAppResource(
@@ -89,16 +85,19 @@ export function registerWidgetResource(
   );
 }
 
-function injectMcpHostBridge(html, { initialDisplayMode = "" } = {}) {
+function injectMcpHostBridge(html, { appVersion, initialDisplayMode = "" } = {}) {
   const bridge = [
+    '<script id="cowartStartupDiagnostics">',
+    escapeInlineScript(`(${installCowartStartupDiagnostics.toString()})(${JSON.stringify(appVersion)});`),
+    "</script>",
     '<script id="cowartInitialDisplayMode">',
     `window.__COWART_INITIAL_DISPLAY_MODE__=${JSON.stringify(initialDisplayMode)};`,
     "</script>",
     '<script id="cowartMcpAppsBundle">',
-    escapeInlineScript(mcpAppsGlobalScript()),
+    escapeInlineScript(MCP_APPS_GLOBAL_SCRIPT),
     "</script>",
     '<script id="cowartMcpHostBridge">',
-    mcpHostBridgeScript(),
+    mcpHostBridgeScript(appVersion),
     "</script>",
   ].join("\n");
 
@@ -108,66 +107,27 @@ function injectMcpHostBridge(html, { initialDisplayMode = "" } = {}) {
   return `${bridge}\n${html}`;
 }
 
-function mcpAppsGlobalScript() {
-  if (cachedMcpAppsGlobalScript) return cachedMcpAppsGlobalScript;
-
-  const sourcePath = require.resolve("@modelcontextprotocol/ext-apps/app-with-deps");
-  const source = readFileSync(sourcePath, "utf8");
-  const exportStart = source.lastIndexOf("export{");
-  if (exportStart === -1) {
-    throw new Error("Could not find ext-apps browser export block.");
-  }
-
-  const exportBlock = source.slice(exportStart).match(/^export\{([^}]+)\};?\s*$/s);
-  if (!exportBlock) {
-    throw new Error("Could not parse ext-apps browser export block.");
-  }
-
-  const exportMap = parseExportMap(exportBlock[1]);
-  const requiredExports = [
-    "App",
-    "applyDocumentTheme",
-    "applyHostFonts",
-    "applyHostStyleVariables",
-  ];
-  for (const name of requiredExports) {
-    if (!exportMap.has(name)) throw new Error(`Missing ext-apps browser export: ${name}`);
-  }
-
-  cachedMcpAppsGlobalScript = [
-    source.slice(0, exportStart),
-    ";globalThis.__COWART_MCP_APPS__={",
-    requiredExports.map((name) => `${JSON.stringify(name)}:${exportMap.get(name)}`).join(","),
-    "};",
-  ].join("");
-  return cachedMcpAppsGlobalScript;
-}
-
-function parseExportMap(body) {
-  const exportMap = new Map();
-  for (const rawEntry of body.split(",")) {
-    const entry = rawEntry.trim();
-    if (!entry) continue;
-    const parts = entry.split(/\s+as\s+/);
-    const local = parts[0]?.trim();
-    const exported = (parts[1] || parts[0])?.trim();
-    if (local && exported) exportMap.set(exported, local);
-  }
-  return exportMap;
-}
-
 function escapeInlineScript(source) {
   return source.replaceAll("</script", "<\\/script").replaceAll("</SCRIPT", "<\\/SCRIPT");
 }
 
-function mcpHostBridgeScript() {
+function mcpHostBridgeScript(appVersion) {
+  if (typeof appVersion !== "string" || !appVersion.trim()) {
+    throw new Error("Cowart widget bridge requires the plugin version.");
+  }
+
   return `(() => {
   "use strict";
 
+  const reportStartup = globalThis.__COWART_REPORT_STARTUP__ || (() => {});
   const apps = globalThis.__COWART_MCP_APPS__;
-  if (!apps || typeof apps.App !== "function") return;
+  if (!apps || typeof apps.App !== "function") {
+    reportStartup("sdk_missing");
+    return;
+  }
 
   let mcpApp = null;
+  let bridgeTimer;
 
   function publishHostGlobals(globals) {
     window.openai = Object.assign(window.openai || {}, globals);
@@ -257,6 +217,17 @@ function mcpHostBridgeScript() {
     }
   }
 
+  function globalWorkspaceContext(payload) {
+    if (!payload?.globalWorkspace || !payload.projectDir || !payload.canvasDir) return null;
+    return {
+      type: "text",
+      text: "This request belongs to the open Cowart Documents canvas. Pass these exact paths to Cowart tools: " +
+        JSON.stringify({ projectDir: payload.projectDir, canvasDir: payload.canvasDir }) +
+        ". Reuse this canvas; do not substitute the conversation working directory or open another widget.",
+      annotations: { audience: ["assistant"] },
+    };
+  }
+
   function installCowartApi(app) {
     const api = window.cowartMcp || {};
     window.cowartMcp = api;
@@ -266,10 +237,15 @@ function mcpHostBridgeScript() {
         const prompt = promptFromMessage(message);
         if (!prompt) throw new Error("Missing follow-up prompt.");
         if (!app || typeof app.sendMessage !== "function") throw new Error("Host bridge is unavailable.");
+        const content = [...contentFromMessage(message, prompt)];
+        // Capture the target at send time. Project-conversation messages retain
+        // their existing content and routing.
+        const workspaceContext = globalWorkspaceContext(window.openai?.toolOutput);
+        if (workspaceContext) content.push(workspaceContext);
         await waitForReady(app);
         const result = await withTimeout(app.sendMessage({
           role: "user",
-          content: contentFromMessage(message, prompt),
+          content,
         }), 8000, "Host did not accept the follow-up message.");
         if (result?.isError) throw new Error("Host rejected the follow-up message.");
         return result || {};
@@ -282,11 +258,13 @@ function mcpHostBridgeScript() {
       try {
         if (!app || typeof app.callServerTool !== "function") throw new Error("Host tool bridge is unavailable.");
         await waitForReady(app);
-        return await withTimeout(
-          app.callServerTool(request, options),
-          options?.timeoutMs || 30000,
-          "Cowart server tool call timed out.",
-        );
+        // Let the SDK own the deadline: it removes pending response handlers
+        // and notifies the host on timeout. Promise.race only abandoned the
+        // caller while the underlying tool request continued to retain data.
+        return await app.callServerTool(request, {
+          ...options,
+          timeout: options?.timeoutMs || options?.timeout || 30000,
+        });
       } catch (error) {
         throw toBridgeError(error);
       }
@@ -321,59 +299,108 @@ function mcpHostBridgeScript() {
   }
 
   function payloadFromToolResult(result) {
+    // Project conversations can deliver the entire MCP result as JSON text in
+    // a content block, while the sidebar delivers the native result directly.
+    for (let depth = 0; depth < 3; depth++) {
+      if (result?.structuredContent || result?._meta?.widgetData) break;
+      const content = result?.content;
+      if (!Array.isArray(content) || content.length !== 1 || content[0]?.type !== "text") break;
+      try {
+        const decoded = JSON.parse(content[0].text);
+        if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) break;
+        result = decoded;
+      } catch (_error) {
+        break;
+      }
+    }
     const metadata = result && typeof result === "object" ? result._meta || {} : {};
     const payload = metadata.widgetData || result?.structuredContent || result || {};
     return { metadata, payload };
   }
 
+  function handleToolInput(input) {
+    const args = input?.arguments;
+    if (!args?.projectDir && !args?.canvasDir) return;
+    // Retain the explicit project even if a large/old result is malformed.
+    // An empty sidebar launch must still wait for its resolved Documents path.
+    publishHostGlobals({ toolOutput: { ...args } });
+  }
+
   function handleToolResult(result) {
     const { metadata, payload } = payloadFromToolResult(result);
+    reportStartup("tool_result_received");
+    if (!payload.projectDir && !payload.canvasDir) {
+      if (!window.openai?.toolOutput?.projectDir && !window.openai?.toolOutput?.canvasDir) {
+        reportStartup("tool_result_missing_target");
+      }
+      return;
+    }
     publishHostGlobals({
       rawToolResult: result,
       toolOutput: payload,
       toolResponseMetadata: metadata,
     });
+    const workspaceContext = globalWorkspaceContext(payload);
+    if (workspaceContext) {
+      window.cowartMcp.updateModelContext({ content: [workspaceContext] }).catch(() => {
+        console.warn("Cowart could not attach its workspace context to the conversation.");
+      });
+    }
     sendCurrentSize();
   }
 
   window.addEventListener("message", (event) => {
-    const result = event.data?.params?.result;
-    if (event.data?.method === "ui/notifications/tool-result" && result) {
-      handleToolResult(result);
+    if (event.data?.method === "ui/notifications/tool-result" && event.data.params) {
+      handleToolResult(event.data.params.result || event.data.params);
     }
   });
 
   try {
     mcpApp = new apps.App(
-      { name: "cowart", version: "0.1.6" },
-      { availableDisplayModes: ["inline", "fullscreen"] },
+      { name: "cowart", version: ${JSON.stringify(appVersion)} },
+      { availableDisplayModes: ["fullscreen"] },
       { autoResize: true },
     );
     globalThis.__COWART_MCP_APP__ = mcpApp;
     installCowartApi(mcpApp);
 
     mcpApp.addEventListener("hostcontextchanged", applyHostContext);
+    mcpApp.addEventListener("toolinput", handleToolInput);
     mcpApp.addEventListener("toolresult", handleToolResult);
 
+    reportStartup("bridge_connecting");
+    // Observe a stalled handshake without cancelling a host that becomes ready later.
+    bridgeTimer = setTimeout(() => reportStartup("bridge_timeout"), 5000);
     mcpApp.ready = mcpApp.connect()
       .then(() => {
+        clearTimeout(bridgeTimer);
+        reportStartup("bridge_ready");
         installCowartApi(mcpApp);
         publishHostGlobals({
           hostCapabilities: mcpApp.getHostCapabilities && mcpApp.getHostCapabilities(),
           hostInfo: mcpApp.getHostVersion && mcpApp.getHostVersion(),
         });
-        applyHostContext(mcpApp.getHostContext && mcpApp.getHostContext());
+        const hostContext = mcpApp.getHostContext && mcpApp.getHostContext();
+        applyHostContext(hostContext);
         const initialMode = window.__COWART_INITIAL_DISPLAY_MODE__;
-        if (initialMode === "fullscreen" && typeof mcpApp.requestDisplayMode === "function") {
-          mcpApp.requestDisplayMode({ mode: "fullscreen" }).catch(() => {});
+        if (initialMode === "fullscreen" && hostContext?.displayMode === "inline" &&
+            hostContext.availableDisplayModes?.includes("fullscreen") &&
+            typeof mcpApp.requestDisplayMode === "function") {
+          mcpApp.requestDisplayMode({ mode: "fullscreen" }).then((result) => {
+            if (result?.mode) applyHostContext({ ...mcpApp.getHostContext(), displayMode: result.mode });
+          }).catch(() => {});
         }
         sendCurrentSize();
       })
       .catch((error) => {
+        clearTimeout(bridgeTimer);
         globalThis.__COWART_MCP_HOST_ERROR__ = error;
+        reportStartup("bridge_failed");
       });
   } catch (error) {
+    clearTimeout(bridgeTimer);
     globalThis.__COWART_MCP_HOST_ERROR__ = error;
+    reportStartup("bridge_failed");
   }
 })();`;
 }

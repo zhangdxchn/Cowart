@@ -1,6 +1,6 @@
 ---
 name: cowart-image-edit
-description: Generate new AI images from user-supplied Cowart annotation screenshots. Use when the user provides one or more screenshots showing Cowart images marked with the 批注 tool, arrows, or visible edit notes and wants Codex to apply those requested changes, create revised bitmap images, and place each result beside the corresponding original or in a nearby clear area without replacing, moving, hiding, or deleting the original images or annotations.
+description: Generate revised AI images from user-supplied Cowart annotation screenshots and place each result beside its original without replacing, moving, hiding, or deleting existing images or annotations.
 ---
 
 # Cowart Image Edit
@@ -9,11 +9,15 @@ Use this skill to turn user-provided Cowart 批注 screenshots into revised AI-g
 
 ## Preconditions
 
-The native Cowart widget should be open for the active project. Cowart state is read and written through Cowart MCP tools, not through a localhost browser service.
+Ensure the `cowart_mcp` tools required by this workflow are available. Do not call `render_cowart_canvas_widget` as a routine prerequisite: annotation requests sent from the Cowart widget already have an open canvas, and the existing widget synchronizes inserted results from MCP-backed storage. If the user separately asks to open, reopen, or explicitly refresh the canvas, handle that request once with the canvas-opening workflow.
+
+Cowart state is read and written through Cowart MCP tools, not through a localhost browser service.
 
 The user is responsible for providing the relevant screenshot(s). Do not auto-capture the current canvas and do not scan the whole canvas to infer edit requests; a canvas may contain many images with different annotations.
 
 ## Workflow
+
+For a follow-up from Cowart's sidebar canvas, use the exact `projectDir` and `canvasDir` in the Cowart context/message for all Cowart tools. These paths can differ from the conversation working directory. In ordinary project conversations, keep using the active user project as before.
 
 1. Read the user-provided screenshot(s).
 

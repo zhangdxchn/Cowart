@@ -13,6 +13,7 @@ import {
   computeMindMapLayout,
   createMindMapBindingUpdates,
   createMindMapDepthStyleUpdates,
+  createMindMapInvalidEdgeRepairs,
   createMindMapLayoutUpdates,
   createMindMapPresetUpdates,
   createMindMapStyleUpdates,
@@ -33,7 +34,7 @@ import {
 test('createMindMapTopicAtomically publishes a complete relation in one store operation', () => {
   const operations = []
   let atomicDepth = 0
-  const createdShapeIds = []
+  const createdShapes = []
   let bindingCount = 0
   const editor = {
     store: {
@@ -43,14 +44,14 @@ test('createMindMapTopicAtomically publishes a complete relation in one store op
         operation()
         atomicDepth -= 1
         operations.push('atomic:end')
-        assert.deepEqual(createdShapeIds, ['shape:child', 'shape:edge'])
+        assert.deepEqual(createdShapes.map((shape) => shape.id), ['shape:child', 'shape:edge'])
         assert.equal(bindingCount, 2)
         operations.push('operation:complete')
       }
     },
     createShape(shape) {
       assert.equal(atomicDepth, 1)
-      createdShapeIds.push(shape.id)
+      createdShapes.push(shape)
       operations.push(`shape:${shape.id}`)
     },
     createBindings(bindings) {
@@ -65,8 +66,8 @@ test('createMindMapTopicAtomically publishes a complete relation in one store op
         : `root:${shape.id}:${shape.meta.cowartMindMapAutoLayout}`)
     }
   }
-  const nodeShape = { id: 'shape:child', type: 'geo' }
-  const edgeShape = { id: 'shape:edge', type: 'arrow' }
+  const nodeShape = { id: 'shape:child', type: 'geo', x: 2362.8, y: 3899.1 }
+  const edgeShape = { id: 'shape:edge', type: 'arrow', x: 2140.8, y: 3932.6 }
   const bindings = [{ type: 'arrow' }, { type: 'arrow' }]
   const rootUpdate = {
     id: 'shape:root',
@@ -74,9 +75,23 @@ test('createMindMapTopicAtomically publishes a complete relation in one store op
     meta: { cowartMindMapAutoLayout: true }
   }
 
-  const nodeId = createMindMapTopicAtomically(editor, nodeShape, edgeShape, bindings, rootUpdate)
+  const nodeId = createMindMapTopicAtomically(
+    editor,
+    nodeShape,
+    edgeShape,
+    bindings,
+    rootUpdate,
+    'shape:frame'
+  )
 
   assert.equal(nodeId, nodeShape.id)
+  assert.deepEqual(
+    createdShapes.map(({ id, parentId, x, y }) => ({ id, parentId, x, y })),
+    [
+      { id: 'shape:child', parentId: 'shape:frame', x: 2362.8, y: 3899.1 },
+      { id: 'shape:edge', parentId: 'shape:frame', x: 2140.8, y: 3932.6 }
+    ]
+  )
   assert.deepEqual(operations, [
     'atomic:start',
     'shape:shape:child',
@@ -411,10 +426,32 @@ test('buildMindMapGraph rejects a second parent and cycle without corrupting the
   fixture.bindings.push(...duplicate.bindings, ...cycle.bindings)
 
   const graph = buildMindMapGraph(fixture)
+  const repairs = createMindMapInvalidEdgeRepairs(graph)
 
   assert.equal(graph.parentByChild.get('shape:left-a'), 'shape:left')
   assert.deepEqual(graph.invalidEdgeIds.sort(), ['shape:edge-cycle', 'shape:edge-duplicate'])
+  assert.deepEqual(graph.incompleteEdgeIds, [])
+  assert.deepEqual(repairs.deleteShapeIds, [])
+  assert.deepEqual(
+    repairs.updates.map((update) => update.id).sort(),
+    ['shape:edge-cycle', 'shape:edge-duplicate']
+  )
   assert.deepEqual(graph.rootIds, ['shape:root'])
+})
+
+test('incomplete mind-map edges are deleted instead of becoming persistent plain arrows', () => {
+  const fixture = graphFixture()
+  fixture.bindings = fixture.bindings.filter(
+    (binding) => binding.id !== 'binding:shape:edge-left-a:end'
+  )
+
+  const graph = buildMindMapGraph(fixture)
+  const repairs = createMindMapInvalidEdgeRepairs(graph)
+
+  assert.deepEqual(graph.invalidEdgeIds, ['shape:edge-left-a'])
+  assert.deepEqual(graph.incompleteEdgeIds, ['shape:edge-left-a'])
+  assert.deepEqual(repairs.deleteShapeIds, ['shape:edge-left-a'])
+  assert.deepEqual(repairs.updates, [])
 })
 
 test('computeMindMapLayout lays out variable-height branches on both sides without overlap', () => {

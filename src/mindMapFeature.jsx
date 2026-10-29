@@ -28,6 +28,7 @@ import {
   computeMindMapLayout,
   createMindMapBindingUpdates,
   createMindMapDepthStyleUpdates,
+  createMindMapInvalidEdgeRepairs,
   createMindMapLayoutUpdates,
   createMindMapPresetUpdates,
   createMindMapStyleUpdates,
@@ -338,7 +339,14 @@ function createMindMapTopic(editor, parentId, { afterChildId = null, side = null
 
   editor.markHistoryStoppingPoint('create_mind_map_topic')
   editor.run(() => {
-    createMindMapTopicAtomically(editor, nodeShape, edgeShape, bindings, rootUpdate)
+    createMindMapTopicAtomically(
+      editor,
+      nodeShape,
+      edgeShape,
+      bindings,
+      rootUpdate,
+      parent.parentId
+    )
   })
   startEditingMindMapNode(editor, nodeId)
   return nodeId
@@ -507,23 +515,9 @@ export class CowartMindMapGeoShapeUtil extends GeoShapeUtil {
 
 function synchronizeMindMaps(editor) {
   const graph = editorMindMapGraph(editor)
-  const updates = []
+  const invalidEdgeRepairs = createMindMapInvalidEdgeRepairs(graph)
+  const updates = [...invalidEdgeRepairs.updates]
   const bindingUpdates = []
-
-  for (const edgeId of graph.invalidEdgeIds) {
-    const edge = graph.edgeById.get(edgeId)
-    if (!edge) continue
-    updates.push({
-      id: edge.id,
-      type: edge.type,
-      isLocked: false,
-      meta: {
-        ...edge.meta,
-        cowartMindMapEdge: false,
-        cowartMindMapHidden: false
-      }
-    })
-  }
 
   for (const rootId of graph.rootIds) {
     const root = graph.nodeById.get(rootId)
@@ -540,8 +534,11 @@ function synchronizeMindMaps(editor) {
     bindingUpdates.push(...createMindMapBindingUpdates(graph, layout))
   }
 
-  if (updates.length || bindingUpdates.length) {
+  if (invalidEdgeRepairs.deleteShapeIds.length || updates.length || bindingUpdates.length) {
     editor.run(() => {
+      if (invalidEdgeRepairs.deleteShapeIds.length) {
+        editor.deleteShapes(invalidEdgeRepairs.deleteShapeIds)
+      }
       if (updates.length) editor.updateShapes(updates)
       if (bindingUpdates.length) editor.updateBindings(bindingUpdates)
     }, { ignoreShapeLock: true })

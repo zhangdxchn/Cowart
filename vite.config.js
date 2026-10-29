@@ -1,11 +1,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { randomUUID } from 'node:crypto'
-import { createReadStream } from 'node:fs'
+import { createReadStream, readFileSync } from 'node:fs'
 import { copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 
 const projectDir = resolve(process.env.COWART_PROJECT_DIR ?? process.cwd())
+const cowartAppVersion = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8')
+).version
 const canvasDir = resolve(process.env.COWART_CANVAS_DIR ?? join(projectDir, 'canvas'))
 const canvasFile = join(canvasDir, 'cowart-canvas.json')
 const selectionFile = join(canvasDir, 'cowart-selection.json')
@@ -765,6 +768,7 @@ export default defineConfig({
   plugins: [react(), canvasStoragePlugin()],
   define: {
     __COWART_WIDGET_BUILD__: JSON.stringify(process.env.COWART_WIDGET_BUILD === '1'),
+    __COWART_APP_VERSION__: JSON.stringify(cowartAppVersion),
     'process.env.NODE_ENV': JSON.stringify('development')
   },
   build: {

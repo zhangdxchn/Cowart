@@ -1,6 +1,6 @@
 ---
 name: cowart-image-gen
-description: Generate a final AI bitmap for the Cowart canvas, including any requested in-image text by default. Use when the user asks Codex to create, fill, replace, or place an AI-generated image on a Cowart canvas. If an AI 图片 holder is selected, use it as the size target and replace it with the generated image by default; otherwise generate the image and insert it into the current Cowart page.
+description: Generate and place a final AI bitmap on the Cowart canvas, replacing a selected AI 图片 holder or inserting the image into the current page.
 ---
 
 # Cowart Image Gen
@@ -9,7 +9,9 @@ Use this skill when the user wants an AI-generated image placed onto the Cowart 
 
 ## Preconditions
 
-The native Cowart widget should be open for the user's active project. Cowart state is read and written through Cowart MCP tools, not through a localhost browser service.
+Ensure the `cowart_mcp` tools required by this workflow are available. Do not call `render_cowart_canvas_widget` as a routine prerequisite: requests sent from the Cowart widget already have an open canvas, and the existing widget synchronizes inserted images from MCP-backed storage. If the user separately asks to open, reopen, or explicitly refresh the canvas, handle that request once with the canvas-opening workflow.
+
+Cowart state is read and written through Cowart MCP tools, not through a localhost browser service.
 
 New holders are tldraw `frame` shapes with:
 
@@ -26,6 +28,8 @@ Older canvases may still contain legacy `geo` rectangle holders with the same
 meta flag. Support both shapes.
 
 ## Workflow
+
+For a follow-up from Cowart's sidebar canvas, use the exact `projectDir` and `canvasDir` in the Cowart context/message for all Cowart tools. These paths can differ from the conversation working directory. In ordinary project conversations, keep using the active user project as before.
 
 1. Read the selected shape from Cowart with the MCP `get_cowart_selection` tool. Pass the active user project directory as `projectDir`.
 
